@@ -4,6 +4,7 @@
 ## Author: olsen
 ## Version: 0.1.0
 ## SavedVariables: ManaMasterDB
+## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
 
 ManaMaster.lua
 HistoryPanel.lua

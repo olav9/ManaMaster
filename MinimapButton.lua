@@ -1,6 +1,6 @@
 local _, ns = ...
 
-local ICON = "Interface\\Icons\\INV_Potion_76" -- mana potion
+local ICON = "Interface\\Icons\\INV_Elemental_Mote_Mana" -- Mote of Mana; keep in sync with IconTexture in the .toc
 
 local button
 
