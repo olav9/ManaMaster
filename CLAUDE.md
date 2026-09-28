@@ -10,8 +10,12 @@ ManaMaster is a World of Warcraft addon for mana tracking and management.
 
 ## Structure
 
-- `ManaMaster.toc`: addon manifest. SavedVariables: `ManaMasterDB`.
-- `ManaMaster.lua`: main addon code (event handling, saved settings, slash commands `/mm` and `/manamaster`). Shares helpers with other files through the addon namespace `ns`.
+One codebase serves several clients. Each client gets its own TOC, which loads the shared files plus that client's mana file.
+
+- `ManaMaster.toc`: addon manifest for WoW Forever (interface 16001). SavedVariables: `ManaMasterDB`. Loads `ManaMaster.lua`, `Mana_Forever.lua`, `HistoryPanel.lua` and `MinimapButton.lua`.
+- `ManaMaster.lua`: shared core: fight lifecycle and naming, per-spell spending from casts, pre-combat casts, buff uptime (`REGEN_BUFFS`, `ScanAuras`), readable-mana delta tracking, history, the on-screen display and mana bar, the chat summary, events, and the slash commands `/mm` and `/manamaster`. It exposes helpers and state through the addon namespace `ns`: `ns.current` is the running fight, and `ns.debugMode`, `ns.Debug`, `ns.IsReadable` and others are shared helpers. It calls the client's `ns.Mana.*` hooks, documented at the top of the file.
+- `Mana_Forever.lua`: the WoW Forever implementation of `ns.Mana`: the estimated mana pool, the regen and five-second rule, full-mana detection, potion estimates (`KNOWN_MANA_RESTORES`) and regen blockers (`REGEN_BLOCKERS`). Everything that exists because mana is secret there.
+- Planned: `ManaMaster_TBC.toc` (interface **20506**, confirmed in the TBC Anniversary client) and `Mana_TBC.lua`. TBC has readable mana and the combat log, per Details' TBC setup; this isn't tested yet.
 - `HistoryPanel.lua`: fight history window (`/mm`). Loaded after `ManaMaster.lua`. Provides `ns.ToggleHistory`, `ns.RefreshHistory` and `ns.ShowNewestFight`. The panel shows the newest fight when it opens, and switches to each new fight as it ends while open.
 - `MinimapButton.lua`: draggable minimap button that toggles the history panel. Created from `OnAddonLoaded` once `ManaMasterDB` exists. Position is saved in `ManaMasterDB.minimapAngle`.
 
@@ -88,4 +92,7 @@ Notes from the experiment:
 
 ## Testing
 
-In game, the addon folder must be named `ManaMaster` inside the client's `Interface\AddOns\` directory. Use `/reload` after making changes.
+In game, the addon folder must be named `ManaMaster` inside the client's `Interface\AddOns\` directory. Use `/reload` after making changes; new files or TOC changes need a full client restart. Both clients point at this project folder through directory junctions:
+
+- WoW Forever: `_classic_beta_\Interface\AddOns\ManaMaster`
+- TBC Anniversary: `_anniversary_\Interface\AddOns\ManaMaster`

@@ -7,5 +7,6 @@
 ## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
 
 ManaMaster.lua
+Mana_Forever.lua
 HistoryPanel.lua
 MinimapButton.lua

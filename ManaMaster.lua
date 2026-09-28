@@ -1,12 +1,20 @@
 local addonName, ns = ...
 
+-- Shared core: fight lifecycle, per-spell spending, buff uptime, history, display and commands.
+-- Where mana numbers come from differs per client, so that lives in a client file (Mana_Forever.lua)
+-- that provides the ns.Mana hooks called below:
+--   Init()                     addon loaded, saved variables ready
+--   OnFightStart(fight, now)   before the fight becomes current; set the client's mana fields on it
+--   OnFightEnd(fight, now)     while the fight is still current; close out the client's mana fields
+--   OnSpellCast(spellID, now)  any successful player cast; return true if it was handled (e.g. a potion)
+--   OnManaSpend(cost, now)     a cast that cost mana, in or out of combat
+--   OnPowerEvent(mana)         a mana UNIT_POWER_FREQUENT; mana is the readable value or nil
+--   OnAuras(fight, now)        the player's auras changed during a fight
+--   OnCombatEnd()              the player left combat
+
 local MANA = Enum.PowerType.Mana
 local MAX_HISTORY = 50
 local PRECOMBAT_WINDOW = 3 -- seconds before combat whose casts count toward the fight
-local FIVE_SECOND_RULE = 5 -- seconds after spending mana that regen stays at the reduced casting rate
-local REGEN_UPDATE_INTERVAL = 1 -- seconds between mana pool estimate updates
-local FULL_QUIET_MIN = 2 -- seconds without a mana event (outside the five-second rule) that mean mana is full
-local FULL_QUIET_MANA = 3 -- ...or the time to regen this much mana, if that's longer (slow regen fires events rarely)
 local MAX_AURA_SCAN = 64 -- buff slots to check; a slot that errors doesn't tell us whether more follow
 local PREFIX = "|cff3fa9f5ManaMaster|r "
 
@@ -28,16 +36,6 @@ local REGEN_BUFFS = {
     ["Mana Regeneration"] = true, -- Mageblood Potion, Nightfin Soup and similar consumables
 }
 
--- Debuffs (English names) that stop mana regen. While one is on the player, the regen they would have
--- had counts as blocked (wasted) instead of gained. Add names here as they're found in game.
-local REGEN_BLOCKERS = {
-}
-
--- Fallback mana restore ranges by spell ID, used when a spell's description can't be read.
-local KNOWN_MANA_RESTORES = {
-    [437] = { 140, 180 }, -- Restore Mana (Minor Mana Potion), confirmed in game
-}
-
 local defaults = {
     enabled = true,
     showMinimapButton = true,
@@ -45,26 +43,20 @@ local defaults = {
 }
 
 local frame = CreateFrame("Frame")
-local current -- the fight being tracked, nil when out of combat
 local encounterActive = false
 local recentCasts = {} -- mana casts made out of combat, within PRECOMBAT_WINDOW
-local regenRates -- last readable GetManaRegen() values: { inactive, active } in mana per second
-local lastManaSpend = 0 -- GetTime() of the last cast that cost mana, for the five-second rule
--- Estimated mana pool, kept running in and out of combat since the real value is secret on WoW Forever.
--- mana is nil until the pool is initialised (max mana readable). confirmed turns true once the estimate
--- has been anchored to a known value: a readable reading, or full mana detected from mana events going quiet.
-local pool = { mana = nil, max = 0, clock = 0, confirmed = false }
-local lastPowerEvent = 0 -- GetTime() of the last mana UNIT_POWER_FREQUENT, for detecting full mana
+ns.current = nil -- the fight being tracked, nil when out of combat
+ns.debugMode = false -- not saved; turn on with /mm debug
+ns.MANA = MANA
+ns.PREFIX = PREFIX
 
 -- Retail can hide combat values from addons ("secret values"); skip anything we can't read.
 local function IsReadable(value)
     return value ~= nil and not (issecretvalue and issecretvalue(value))
 end
 
-local debugMode = false -- not saved; turn on with /mm debug
-
 local function Debug(...)
-    if debugMode then
+    if ns.debugMode then
         print("|cff888888MM debug:|r", ...)
     end
 end
@@ -98,7 +90,7 @@ local function FormatDuration(seconds)
     return string.format("%d:%02d", math.floor(seconds / 60), math.floor(seconds % 60))
 end
 
--- A table of per-spell entries (fight.spells, and later fight.gains/fight.drains) as a list, most mana first.
+-- A table of per-spell entries (fight.spells, fight.gains, fight.drains) as a list, most mana first.
 local function SortedEntries(entries)
     local list = {}
     for key, data in pairs(entries or {}) do
@@ -115,7 +107,7 @@ local function SortedEntries(entries)
     return list
 end
 
--- Total estimated mana from potions, runes and gems (fight.gains); 0 for fights saved before they were tracked.
+-- Total mana from potions, runes and gems (fight.gains); 0 for fights saved before they were tracked.
 local function RestoredTotal(fight)
     local total = 0
     for _, entry in pairs(fight.gains or {}) do
@@ -124,6 +116,55 @@ local function RestoredTotal(fight)
     return total
 end
 
+-- The spell's subtext, e.g. "Rank 2"; nil when it has none.
+local function GetSpellRank(spellID)
+    if not C_Spell.GetSpellSubtext then return end
+    local subtext = C_Spell.GetSpellSubtext(spellID)
+    if IsReadable(subtext) and subtext ~= "" then return subtext end
+end
+
+local function GetManaCost(spellID)
+    local cost = 0
+    for _, powerCost in ipairs(C_Spell.GetSpellPowerCost(spellID) or {}) do
+        if powerCost.type == MANA and IsReadable(powerCost.cost) then
+            cost = cost + powerCost.cost
+        end
+    end
+    return cost
+end
+
+-- Returns the player's auras (filter "HELPFUL" or "HARMFUL") whose names are in `names`, as
+-- name -> { spellID, icon }, plus how many auras couldn't be read. In combat on WoW Forever,
+-- GetAuraDataByIndex throws on auras the game marks secret (e.g. Blood Fury) instead of returning them,
+-- so each slot is read in a pcall and skipped on error.
+local function ScanAuras(filter, names)
+    local found, hidden = {}, 0
+    for i = 1, MAX_AURA_SCAN do
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, filter)
+        if not ok then
+            hidden = hidden + 1
+        elseif not aura then
+            break -- past the last buff
+        else
+            local name = aura.name
+            if not IsReadable(name) then
+                hidden = hidden + 1
+            elseif names[name] then
+                found[name] = {
+                    spellID = IsReadable(aura.spellId) and aura.spellId or nil,
+                    icon = IsReadable(aura.icon) and aura.icon or nil,
+                }
+            end
+        end
+    end
+    return found, hidden
+end
+
+ns.IsReadable = IsReadable
+ns.Debug = Debug
+ns.Describe = Describe
+ns.GetMana = GetMana
+ns.ScanAuras = ScanAuras
 ns.RestoredTotal = RestoredTotal
 ns.FormatNumber = FormatNumber
 ns.FormatDuration = FormatDuration
@@ -192,7 +233,7 @@ end
 local function ShowDisplay()
     displayGeneration = displayGeneration + 1
     UpdateDisplay(0)
-    if not debugMode then return end
+    if not ns.debugMode then return end
     display:Show()
     UpdateManaBar()
 end
@@ -252,102 +293,10 @@ local function PrintSummary(fight)
     end
 end
 
-local function GetManaCost(spellID)
-    local cost = 0
-    for _, powerCost in ipairs(C_Spell.GetSpellPowerCost(spellID) or {}) do
-        if powerCost.type == MANA and IsReadable(powerCost.cost) then
-            cost = cost + powerCost.cost
-        end
-    end
-    return cost
-end
-
--- The spell's subtext, e.g. "Rank 2"; nil when it has none.
-local function GetSpellRank(spellID)
-    if not C_Spell.GetSpellSubtext then return end
-    local subtext = C_Spell.GetSpellSubtext(spellID)
-    if IsReadable(subtext) and subtext ~= "" then return subtext end
-end
-
--- Keeps the last readable regen rates (mana per second), since they may be hidden in combat.
-local function ReadManaRegen()
-    if not GetManaRegen then return end
-    local inactive, active = GetManaRegen()
-    if IsReadable(inactive) and IsReadable(active) then
-        regenRates = { inactive = inactive, active = active }
-    end
-end
-
--- Adds estimated regen to the pool from pool.clock up to now. Time within FIVE_SECOND_RULE of the last
--- mana spend regens at the "active" (casting) rate, the rest at the full "inactive" rate. Regen past max
--- mana is wasted. During a fight the amounts are also booked to it: gained regen, wasted at full mana,
--- or all of it as blocked while a regen-blocking debuff is up.
--- Call before changing lastManaSpend, the pool or current.regenBlocked, so the interval uses the old state.
-local function AdvancePool(now)
-    local from = pool.clock
-    pool.clock = now
-    if not pool.mana or not regenRates or now <= from then return end
-    local ruleEnd = lastManaSpend + FIVE_SECOND_RULE
-    local activeTime = math.max(0, math.min(now, ruleEnd) - from)
-    local inactiveTime = (now - from) - activeTime
-    local amount = activeTime * regenRates.active + inactiveTime * regenRates.inactive
-
-    if current and current.regenBlocked then
-        current.wastedBlocked = current.wastedBlocked + amount
-        return
-    end
-    local gained = math.min(amount, math.max(0, pool.max - pool.mana))
-    pool.mana = pool.mana + gained
-    if current then
-        current.wastedFull = current.wastedFull + (amount - gained)
-        current.regen = current.regen + gained
-    end
-end
-
--- Sets the pool to a known value (a readable mana reading, or max when full mana is detected).
-local function AnchorPool(mana, reason)
-    AdvancePool(GetTime())
-    if debugMode and (not pool.confirmed or math.abs((pool.mana or 0) - mana) >= 1) then
-        Debug("mana pool anchored:", reason, "| estimate was", pool.mana and math.floor(pool.mana + 0.5) or "unset",
-            "now", mana)
-    end
-    pool.mana = mana
-    pool.confirmed = true
-end
-
--- Starts the pool once max mana is readable. It assumes full until something anchors it.
-local function InitPool()
-    local maxMana = UnitPowerMax("player", MANA)
-    if not IsReadable(maxMana) or maxMana <= 0 then return end
-    pool.max = maxMana
-    pool.clock = GetTime()
-    local mana = GetMana()
-    pool.mana = mana or maxMana
-    pool.confirmed = mana ~= nil
-end
-
--- Out of combat, mana events fire continuously while mana regenerates and stop once it's full. So a quiet
--- spell outside the five-second rule (when regen is near zero and events also stop) means mana is full.
-local function CheckFullMana(now)
-    if current or not pool.mana or not regenRates or regenRates.inactive <= 0 then return end
-    if UnitIsDeadOrGhost("player") then return end
-    local quiet = math.max(FULL_QUIET_MIN, FULL_QUIET_MANA / regenRates.inactive)
-    if now - lastPowerEvent >= quiet and now - quiet >= lastManaSpend + FIVE_SECOND_RULE then
-        if pool.mana < pool.max or not pool.confirmed then
-            AnchorPool(pool.max, "mana events quiet, so mana is full")
-        end
-    end
-end
-
 -- Per-spell spending uses the spell's listed mana cost, since mana changes can't be tied to a cast directly.
 -- The same costs drive the total when the game hides the player's mana.
--- inPool: the cost was already taken out of the pool when it was cast (pre-combat casts), so don't take
--- it out again.
-local function AddCast(fight, spellID, cost, inPool)
+local function AddCast(fight, spellID, cost)
     fight.castSpent = fight.castSpent + cost
-    if not inPool and pool.mana then
-        pool.mana = math.max(0, pool.mana - cost)
-    end
     if fight.manaHidden then
         UpdateDisplay(fight.castSpent)
     end
@@ -368,100 +317,10 @@ local function AddCast(fight, spellID, cost, inPool)
     entry.mana = entry.mana + cost
 end
 
--- Mana restored by a spell the player uses (potions, runes, gems), as { min, max }, or nil if it doesn't
--- restore mana. Parsed from the English description ("Restores 140 to 180 mana."), anchored at the start
--- so spells like Mana Spring ("Summons a totem that restores...") don't match. Cached per spell ID.
-local restoreCache = {}
-
-local function GetManaRestore(spellID)
-    local cached = restoreCache[spellID]
-    if cached ~= nil then return cached or nil end
-
-    local description = C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(spellID)
-    if not IsReadable(description) or description == "" then
-        -- Description hidden or not loaded yet: use the fallback, and don't cache so a later cast can retry.
-        return KNOWN_MANA_RESTORES[spellID]
-    end
-    local low, high = description:match("^Restores (%d+) to (%d+) mana")
-    if not low then
-        low = description:match("^Restores (%d+) mana")
-        high = low
-    end
-    -- Drinks ("Restores 1344 mana over 18 sec.") restore over time and aren't one-off gains.
-    if low and description:find(" over [%d%.]+ sec") then
-        low, high = nil, nil
-    end
-    local restore = low and { tonumber(low), tonumber(high) } or KNOWN_MANA_RESTORES[spellID] or false
-    restoreCache[spellID] = restore
-    return restore or nil
-end
-
--- Adds an estimated mana gain (average of the restore range) to the pool and, during a fight, to the fight.
--- Whatever doesn't fit under max mana counts as wasted at full mana, like the game's "Overenergized".
-local function AddRestore(fight, spellID, restore, now)
-    AdvancePool(now) -- settle regen up to now so the cap applies in the right order
-    local amount = (restore[1] + restore[2]) / 2
-    local gained = amount
-    if pool.mana then
-        gained = math.min(amount, math.max(0, pool.max - pool.mana))
-        pool.mana = pool.mana + gained
-    end
-    if not fight then return end
-    fight.wastedFull = fight.wastedFull + (amount - gained)
-
-    local entry = fight.gains[spellID]
-    if not entry then
-        local range = restore[1] == restore[2] and tostring(restore[1]) or (restore[1] .. "-" .. restore[2])
-        entry = {
-            casts = 0,
-            mana = 0,
-            spellID = spellID,
-            name = C_Spell.GetSpellName(spellID) or tostring(spellID),
-            rank = range, -- shown next to the name; several potion sizes share the name "Restore Mana"
-        }
-        fight.gains[spellID] = entry
-    end
-    entry.casts = entry.casts + 1
-    entry.mana = entry.mana + gained
-    Debug("mana restore", entry.name, "estimated", amount, "gained", gained)
-end
-
--- Returns the player's auras (filter "HELPFUL" or "HARMFUL") whose names are in `names`, as
--- name -> { spellID, icon }, plus how many auras couldn't be read. In combat, GetAuraDataByIndex throws
--- on auras the game marks secret (e.g. Blood Fury) instead of returning them, so each slot is read in a
--- pcall and skipped on error.
-local function ScanAuras(filter, names)
-    local found, hidden = {}, 0
-    for i = 1, MAX_AURA_SCAN do
-        local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, filter)
-        if not ok then
-            hidden = hidden + 1
-        elseif not aura then
-            break -- past the last buff
-        else
-            local name = aura.name
-            if not IsReadable(name) then
-                hidden = hidden + 1
-            elseif names[name] then
-                found[name] = {
-                    spellID = IsReadable(aura.spellId) and aura.spellId or nil,
-                    icon = IsReadable(aura.icon) and aura.icon or nil,
-                }
-            end
-        end
-    end
-    return found, hidden
-end
-
--- Starts or stops uptime timers for each tracked buff, and the regen-blocked state, to match what
--- the player has now.
+-- Starts or stops uptime timers for each tracked buff to match what the player has now, then lets the
+-- client file react to the change (e.g. regen-blocking debuffs).
 local function UpdateAuras(fight, now)
-    local blockers = ScanAuras("HARMFUL", REGEN_BLOCKERS) -- keep only the first return; the second is a count
-    local blocked = next(blockers) ~= nil
-    if blocked ~= fight.regenBlocked then
-        AdvancePool(now) -- close the interval under the old state first
-        fight.regenBlocked = blocked
-    end
+    ns.Mana.OnAuras(fight, now)
 
     local active = ScanAuras("HELPFUL", REGEN_BUFFS)
     for name, info in pairs(active) do
@@ -481,6 +340,7 @@ local function UpdateAuras(fight, now)
 end
 
 local function StartFight(encounterName)
+    local current = ns.current
     if current then
         -- Combat started before the boss pull; label the fight with the encounter.
         if encounterName then
@@ -496,84 +356,63 @@ local function StartFight(encounterName)
         "target", Describe(UnitName("target")))
     if not IsReadable(maxMana) or maxMana == 0 then return end
 
-    ReadManaRegen()
-    Debug("regen per second", regenRates and regenRates.inactive or "unknown", "while casting",
-        regenRates and regenRates.active or "unknown")
-
+    local now = GetTime()
     local mana = GetMana()
     local targetName = GetHostileTargetName()
-
-    -- Starting mana comes from the running pool estimate, brought up to date with out-of-combat regen.
-    -- If nothing has anchored it since login/reload, it's still the initial "assume full".
-    local now = GetTime()
-    if not pool.mana then InitPool() end
-    pool.max = maxMana
-    if mana then
-        AnchorPool(mana, "readable at fight start")
-    else
-        AdvancePool(now)
-    end
-    local startMana = math.min(pool.mana or maxMana, maxMana)
-    local startManaAssumed = not pool.confirmed or nil
-    Debug("start mana", math.floor(startMana + 0.5), startManaAssumed and "(assumed full, never anchored)" or "(estimated)")
-
-    current = {
+    local fight = {
         name = encounterName or targetName or "Combat",
         isEncounter = encounterName ~= nil,
         targetName = targetName,
         zone = GetRealZoneText(),
         date = time(),
-        startClock = GetTime(),
+        startClock = now,
         maxMana = maxMana,
-        startMana = startMana,
-        startManaAssumed = startManaAssumed,
-        wastedFull = 0, -- regen lost to being at max mana
-        wastedBlocked = 0, -- regen lost to REGEN_BLOCKERS debuffs
-        regenBlocked = false,
         lastMana = mana,
         lowestMana = mana,
         spent = 0,
         recovered = 0,
         castSpent = 0, -- sum of listed spell costs, used when mana is hidden
         manaHidden = mana == nil,
-        regen = 0, -- estimated passive regen, from GetManaRegen and the five-second rule
         spells = {},
-        gains = {}, -- estimated mana restores from potions, runes and gems, keyed by spell ID
         buffs = {}, -- regen buff name -> { uptime, spellID, icon, since }
     }
+    -- The client file sets its mana fields before the fight becomes current, so anything it settles up to
+    -- now (like out-of-combat regen) isn't counted toward this fight.
+    ns.Mana.OnFightStart(fight, now)
+    ns.current = fight
     ShowDisplay()
 
     -- Pre-combat casts count toward the fight. Their mana was spent before combat's own mana tracking
-    -- began, so add them to spent. The pool already took their cost out when they were cast.
+    -- began, so add them to spent. The client file already saw them through OnManaSpend.
     for _, cast in ipairs(recentCasts) do
         if now - cast.time <= PRECOMBAT_WINDOW then
             Debug("pre-combat cast", cast.spellID, "cost", cast.cost)
-            current.spent = current.spent + cast.cost
-            AddCast(current, cast.spellID, cast.cost, true)
+            fight.spent = fight.spent + cast.cost
+            AddCast(fight, cast.spellID, cast.cost)
         end
     end
 
-    UpdateAuras(current, current.startClock)
-    if debugMode then
+    UpdateAuras(fight, now)
+    if ns.debugMode then
         local found, hidden = ScanAuras("HELPFUL", REGEN_BUFFS)
         local names = {}
         for name in pairs(found) do table.insert(names, name) end
         Debug("regen buffs", #names > 0 and table.concat(names, ", ") or "none", "| unreadable buffs", hidden)
     end
     wipe(recentCasts)
-    if not current.manaHidden then
-        UpdateDisplay(current.spent)
+    if not fight.manaHidden then
+        UpdateDisplay(fight.spent)
     end
 end
 
 local function EndFight(success)
-    if not current then return end
-    AdvancePool(GetTime()) -- book the last stretch of regen to the fight while it's still current
-    local fight = current
-    current = nil
+    local fight = ns.current
+    if not fight then return end
+    local now = GetTime()
+    ns.Mana.OnFightEnd(fight, now) -- while the fight is still current, so the last stretch is booked to it
+    ns.current = nil
 
     -- Close any buff still running when the fight ends.
-    local now = GetTime()
     for _, entry in pairs(fight.buffs) do
         if entry.since then
             entry.uptime = entry.uptime + (now - entry.since)
@@ -581,12 +420,11 @@ local function EndFight(success)
         end
     end
 
-    fight.duration = GetTime() - fight.startClock
+    fight.duration = now - fight.startClock
     fight.endMana = fight.lastMana
     fight.success = success
     fight.startClock = nil
     fight.lastMana = nil
-    fight.regenBlocked = nil
     -- If mana was hidden at any point, the delta totals are incomplete; fall back to listed spell costs.
     if fight.manaHidden then
         fight.spent = fight.castSpent
@@ -603,18 +441,18 @@ local function EndFight(success)
     end
 
     -- The end-of-fight chat summary is debug output; /mm last still prints it on request.
-    if debugMode then
+    if ns.debugMode then
         PrintSummary(fight)
     end
     ns.ShowNewestFight() -- if the history panel is open, switch it to the fight that just ended
 end
 
+-- Tracks spent/recovered from actual mana changes when mana is readable (not on WoW Forever).
 local function OnManaChanged()
-    lastPowerEvent = GetTime()
     local mana = GetMana()
-    if mana then
-        AnchorPool(mana, "readable mana event") -- never seen on WoW Forever, but use it if it happens
-    end
+    ns.Mana.OnPowerEvent(mana)
+
+    local current = ns.current
     if not current then return end
     if not mana then
         if not current.manaHidden then
@@ -643,6 +481,7 @@ end
 
 -- Names a fight after the first hostile target if the player had none when combat started.
 local function OnTargetChanged()
+    local current = ns.current
     if not current or current.isEncounter or current.targetName then return end
     local targetName = GetHostileTargetName()
     if targetName then
@@ -653,60 +492,24 @@ end
 
 local function OnSpellCast(spellID)
     if not IsReadable(spellID) then return end
+    local now = GetTime()
 
-    -- Potions, runes and gems: the actual gain is hidden, so add an estimate from the spell's description.
-    -- Out of combat this only updates the pool estimate.
-    local restore = GetManaRestore(spellID)
-    if restore then
-        AddRestore(current, spellID, restore, GetTime())
-        return
-    end
+    -- The client file may handle the cast itself (e.g. estimating a potion on WoW Forever).
+    if ns.Mana.OnSpellCast(spellID, now) then return end
 
     local cost = GetManaCost(spellID)
     if cost <= 0 then return end
+    ns.Mana.OnManaSpend(cost, now)
 
-    local now = GetTime()
-    AdvancePool(now)
-    lastManaSpend = now
-
-    if current then
-        AddCast(current, spellID, cost)
+    if ns.current then
+        AddCast(ns.current, spellID, cost)
     else
-        if pool.mana then
-            pool.mana = math.max(0, pool.mana - cost)
-        end
-        ReadManaRegen() -- out of combat the rates are more likely readable; cache them for the pull
         -- The pull cast usually lands before combat starts; keep it for the fight that follows.
-        table.insert(recentCasts, { time = GetTime(), spellID = spellID, cost = cost })
-        while #recentCasts > 0 and GetTime() - recentCasts[1].time > PRECOMBAT_WINDOW do
+        table.insert(recentCasts, { time = now, spellID = spellID, cost = cost })
+        while #recentCasts > 0 and now - recentCasts[1].time > PRECOMBAT_WINDOW do
             table.remove(recentCasts, 1)
         end
     end
-end
-
--- Runs every REGEN_UPDATE_INTERVAL: refreshes regen rates and max mana, advances the pool, and out of
--- combat checks whether mana is full.
-local function OnPoolTick()
-    local now = GetTime()
-    if not pool.mana then
-        InitPool()
-        if not pool.mana then return end
-    end
-    -- While regen is blocked, keep the rates from before the debuff: they're what the player would
-    -- have regenerated, whether or not the game's own reading drops to 0.
-    if not (current and current.regenBlocked) then
-        ReadManaRegen() -- picks up spirit/MP5 changes when readable
-    end
-    AdvancePool(now)
-
-    local maxNow = UnitPowerMax("player", MANA)
-    if IsReadable(maxNow) and maxNow > 0 then
-        pool.max = maxNow
-        pool.mana = math.min(pool.mana, maxNow)
-        if current then current.maxMana = maxNow end
-    end
-
-    CheckFullMana(now)
 end
 
 local function OnAddonLoaded()
@@ -719,12 +522,7 @@ local function OnAddonLoaded()
     ManaMasterDB.fights = ManaMasterDB.fights or {}
     ns.db = ManaMasterDB
     ns.CreateMinimapButton()
-
-    -- Keep the mana pool estimate running all the time, in and out of combat.
-    lastPowerEvent = GetTime() -- give regen events a moment to arrive before calling mana full
-    ReadManaRegen()
-    InitPool()
-    C_Timer.NewTicker(REGEN_UPDATE_INTERVAL, OnPoolTick)
+    ns.Mana.Init()
 
     -- Handles /reload mid-combat.
     if InCombatLockdown() then
@@ -745,7 +543,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if not encounterActive then
             EndFight()
         end
-        ReadManaRegen()
+        ns.Mana.OnCombatEnd()
     elseif event == "ENCOUNTER_START" then
         local _, encounterName = ...
         encounterActive = true
@@ -767,8 +565,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
     elseif event == "UNIT_MAXPOWER" then
         UpdateManaBar()
     elseif event == "UNIT_AURA" then
-        if current then
-            UpdateAuras(current, GetTime())
+        if ns.current then
+            UpdateAuras(ns.current, GetTime())
         end
     elseif event == "PLAYER_TARGET_CHANGED" then
         OnTargetChanged()
@@ -812,10 +610,11 @@ SlashCmdList.MANAMASTER = function(msg)
         ns.SetMinimapButtonShown(not ns.db.showMinimapButton)
         print(PREFIX .. "minimap button " .. (ns.db.showMinimapButton and "shown" or "hidden"))
     elseif msg == "debug" then
-        debugMode = not debugMode
-        print(PREFIX .. "debug " .. (debugMode and "on" or "off"))
-        if debugMode then
+        ns.debugMode = not ns.debugMode
+        print(PREFIX .. "debug " .. (ns.debugMode and "on" or "off"))
+        if ns.debugMode then
             -- Show the on-screen display right away if a fight is already running.
+            local current = ns.current
             if current then
                 ShowDisplay()
                 UpdateDisplay(current.manaHidden and current.castSpent or current.spent)
