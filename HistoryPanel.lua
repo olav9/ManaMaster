@@ -423,13 +423,29 @@ local function BuildSections(fight)
     -- Regen buff uptime sits right under Mana gained, since the buffs explain much of the gains.
     -- Fights saved before buff tracking have no buffs table; skip the section for those.
     if fight.buffs then
+        -- Mana logged from the combat log (TBC) per source name, to show next to buffs of the same name.
+        local loggedByName = {}
+        if fight.gainsMeasured then
+            for _, entry in pairs(fight.gains or {}) do
+                loggedByName[entry.name] = (loggedByName[entry.name] or 0) + entry.mana
+            end
+        end
+
         local buffs = {}
         for name, data in pairs(fight.buffs) do
             local fraction = fight.duration > 0 and math.min(1, data.uptime / fight.duration) or 0
-            -- Buffs with a known mana per 5 sec show what they were worth over their uptime (an estimate:
-            -- regen past max mana or during a regen-blocking effect isn't subtracted).
-            local worth = data.mp5 and string.format("%s mp5  ·  ~%s mana", ns.FormatNumber(data.mp5),
-                ns.FormatNumber(data.mp5 / 5 * data.uptime))
+            -- What the buff was worth: an estimate from its mana per 5 sec over its uptime (regen past max
+            -- mana isn't subtracted), and/or the exact mana logged under its name (e.g. Mana Spring ticks,
+            -- Water Shield orbs). Both can apply: Water Shield's passive mp5 isn't logged, its orbs are.
+            local parts = {}
+            if data.mp5 then
+                table.insert(parts, string.format("%s mp5  ·  ~%s est.", ns.FormatNumber(data.mp5),
+                    ns.FormatNumber(data.mp5 / 5 * data.uptime)))
+            end
+            if loggedByName[name] then
+                table.insert(parts, "+" .. ns.FormatNumber(loggedByName[name]) .. " logged")
+            end
+            local worth = #parts > 0 and table.concat(parts, "  ·  ") or nil
             table.insert(buffs, {
                 name = name,
                 rank = worth,

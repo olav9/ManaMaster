@@ -136,7 +136,7 @@ local function GetManaCost(spellID)
 end
 
 -- Mana per 5 seconds a buff gives, parsed from its English spell description, or nil. Recognises
--- "15 mana per 5 sec", "15 mana every 5 sec" and "restores 30 mana every 10 sec". This lets set bonuses,
+-- "N mana per M sec" and "N mana every M sec" (e.g. "15 mana per 5 sec", "Gain 20 mana every 2 seconds"). This lets set bonuses,
 -- trinket procs and consumables count as regen buffs without being listed in REGEN_BUFFS.
 -- Cached per spell ID; an empty or unreadable description isn't cached, so a later scan can retry.
 local regenMP5Cache = {}
@@ -148,10 +148,14 @@ local function RegenMP5(spellID)
     if not IsReadable(description) or description == "" then return nil end
 
     description = description:lower()
-    local mp5 = tonumber(description:match("(%d+) mana per 5 sec") or description:match("(%d+) mana every 5 sec"))
-    if not mp5 then
-        local amount, seconds = description:match("restores (%d+) mana every (%d+) sec")
-        if amount then mp5 = tonumber(amount) * 5 / tonumber(seconds) end
+    -- "N mana every/per M sec", with or without "restores"/"gain" in front, scaled to 5 seconds.
+    local mp5
+    local amount, seconds = description:match("(%d+) mana every (%d+) sec")
+    if not amount then
+        amount, seconds = description:match("(%d+) mana per (%d+) sec")
+    end
+    if amount and tonumber(seconds) > 0 then
+        mp5 = tonumber(amount) * 5 / tonumber(seconds)
     end
     regenMP5Cache[spellID] = mp5 or false
     return mp5
