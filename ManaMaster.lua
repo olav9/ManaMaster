@@ -195,6 +195,35 @@ ns.GetMana = GetMana
 local COST_REDUCERS = { "Clearcasting", "Elemental Mastery", "Inner Focus", "Surge of Light", "Power Infusion" }
 local COST_REDUCER_SET = {}
 for _, name in ipairs(COST_REDUCERS) do COST_REDUCER_SET[name] = true end
+
+-- Buffs not in COST_REDUCERS still count as cost reducers if their English description says so, so new
+-- procs (trinkets, set bonuses, other classes) are credited by name instead of "Other reduction".
+local REDUCER_PHRASES = {
+    "reduces the mana cost", "reduce the mana cost", "mana cost reduced", "mana cost of your next",
+    "costs no mana", "cost no mana", "no mana cost", "reduces the cost of your next",
+}
+local reducerCache = {}
+
+-- True if an aura's spell description describes a mana cost reduction. Only temporary auras (with a
+-- duration) qualify: a permanent aura would be "active" on every cast and stop normal costs being learned.
+local function IsCostReducer(spellID, aura)
+    local duration = aura and aura.duration
+    if not IsReadable(duration) or duration <= 0 then return false end
+    local cached = reducerCache[spellID]
+    if cached ~= nil then return cached end
+    local description = C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(spellID)
+    if not IsReadable(description) or description == "" then return false end -- not cached: retry later
+    description = description:lower()
+    local found = false
+    for _, phrase in ipairs(REDUCER_PHRASES) do
+        if description:find(phrase, 1, true) then
+            found = true
+            break
+        end
+    end
+    reducerCache[spellID] = found
+    return found
+end
 local SNAPSHOT_MAX_AGE = 30 -- seconds; a cast-start snapshot older than this is stale
 
 -- Snapshots taken at UNIT_SPELLCAST_SENT, keyed by cast GUID (or spell ID if the GUID isn't readable).
@@ -214,6 +243,12 @@ local function FirstReducer(found)
     for _, name in ipairs(COST_REDUCERS) do
         if found[name] then return name, found[name] end
     end
+    -- Detected from descriptions: take the alphabetically first, so the choice is stable.
+    local first
+    for name in pairs(found) do
+        if not first or name < first then first = name end
+    end
+    if first then return first, found[first] end
 end
 
 -- Several classes' procs share the buff name "Clearcasting"; the buff's spell ID tells them apart.
@@ -235,7 +270,7 @@ local function OnCastSent(castGUID, spellID)
         cost = GetManaCost(spellID),
         mana = GetMana(), -- readable on TBC, nil on WoW Forever
         energize = energizeTotal,
-        reducers = ScanAuras("HELPFUL", COST_REDUCER_SET),
+        reducers = ScanAuras("HELPFUL", COST_REDUCER_SET, IsCostReducer),
     }
     castSnapshots[IsReadable(castGUID) and castGUID or spellID] = snap
     Debug("cast start", C_Spell.GetSpellName(spellID) or spellID, "cost", snap.cost,
@@ -252,17 +287,24 @@ local function PaidCost(castGUID, spellID)
     local snap = castSnapshots[key]
     castSnapshots[key] = nil
     local costAfter = GetManaCost(spellID)
-    local reducersAfter = ScanAuras("HELPFUL", COST_REDUCER_SET)
+    local reducersAfter = ScanAuras("HELPFUL", COST_REDUCER_SET, IsCostReducer)
     if not snap then return costAfter, nil, reducersAfter end
 
     local paid = snap.cost
     local manaNow = GetMana()
     if snap.mana and manaNow then
         local drop = snap.mana - manaNow + (energizeTotal - snap.energize)
+        local nearest = snap.cost
         for _, candidate in ipairs({ costAfter, 0 }) do
-            if math.abs(drop - candidate) < math.abs(drop - paid) then
-                paid = candidate
+            if math.abs(drop - candidate) < math.abs(drop - nearest) then
+                nearest = candidate
             end
+        end
+        -- Only trust the drop if it's close to a listed price. Mana can rise during a cast for reasons that
+        -- aren't logged (a pull cast saw -650), and "nearest" would then wrongly pick 0.
+        local tolerance = math.max(10, 0.25 * math.max(snap.cost, costAfter))
+        if math.abs(drop - nearest) <= tolerance then
+            paid = nearest
         end
     end
     return paid, snap, reducersAfter
