@@ -38,7 +38,7 @@ local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete butt
 
 local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
 local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
-local rows, entryRows, sectionHeaders, noteStrings = {}, {}, {}, {}
+local rows, entryRows, sectionHeaders = {}, {}, {}
 -- Selected fights, as a set of fight tables (so the selection survives new fights being added).
 -- Click selects one; Ctrl+click toggles one; Shift+click selects the range from selectionAnchor.
 local selected = {}
@@ -274,16 +274,6 @@ local function GetSectionHeader(i)
     return header
 end
 
--- Wrapped grey text under a section's rows, e.g. the Mana saved advice.
-local function GetNoteString(i)
-    if noteStrings[i] then return noteStrings[i] end
-    local note = detail.sections:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
-    note:SetJustifyH("LEFT")
-    note:SetWordWrap(true)
-    noteStrings[i] = note
-    return note
-end
-
 -- Shifts a detail row's bar, icon and name right by indent (child rows, e.g. spells under a buff in
 -- Mana saved). Rows are pooled, so every row is re-anchored each time it's shown.
 local function SetRowIndent(row, indent)
@@ -335,18 +325,11 @@ local function GetEntryRow(i)
     return row
 end
 
--- Rows for the Mana saved section, plus an optional advice note. fight.saved is grouped by the buff that
--- reduced the cost (see RecordSaving in ManaMaster.lua): each buff gets a row with its own icon and the
--- talent behind it (e.g. "Clearcasting  Elemental Focus"), followed by indented rows for the spells that
--- used it and what each saved per cast. Spell rows are a breakdown, so they don't add to the section total.
--- The note compares spells under the same buff, since a proc like Clearcasting is worth most on the most
--- expensive eligible spell.
-local ADVICE_RATIO = 0.5 -- advise when a spell saved less than half per cast of the best spell for that buff
+-- Rows for the Mana saved section. fight.saved is grouped by the buff that reduced the cost (see
+-- RecordSaving in ManaMaster.lua): each buff gets a row with its own icon and the talent behind it
+-- (e.g. "Clearcasting  Elemental Focus"), followed by indented rows for the spells that used it and what
+-- each saved per cast. Spell rows are a breakdown, so they don't add to the section total.
 local CHILD_INDENT = 18
-
-local function SpellLabel(spell)
-    return spell.name .. (spell.rank and (" (" .. spell.rank .. ")") or "")
-end
 
 local function BuildSavedEntries(saved)
     local sources = {}
@@ -356,7 +339,7 @@ local function BuildSavedEntries(saved)
     end
     table.sort(sources, function(a, b) return a.mana > b.mana end)
 
-    local entries, notes = {}, {}
+    local entries = {}
     for _, source in ipairs(sources) do
         table.insert(entries, {
             name = source.name,
@@ -370,7 +353,6 @@ local function BuildSavedEntries(saved)
         local spells = {}
         for _, spell in pairs(source.spells) do table.insert(spells, spell) end
         table.sort(spells, function(a, b) return a.mana > b.mana end)
-        local best, worst
         for _, spell in ipairs(spells) do
             local perCast = spell.casts > 0 and spell.mana / spell.casts or 0
             table.insert(entries, {
@@ -381,17 +363,9 @@ local function BuildSavedEntries(saved)
                 mana = spell.mana,
                 child = true,
             })
-            if not best or perCast > best.perCast then best = { name = SpellLabel(spell), perCast = perCast } end
-            if not worst or perCast < worst.perCast then worst = { name = SpellLabel(spell), perCast = perCast } end
-        end
-
-        if source.name ~= "Other reduction" and best and worst.name ~= best.name
-            and worst.perCast < best.perCast * ADVICE_RATIO then
-            table.insert(notes, string.format("Tip: %s saved ~%d per cast on %s but only ~%d on %s. Save it for %s.",
-                source.name, best.perCast + 0.5, best.name, worst.perCast + 0.5, worst.name, best.name))
         end
     end
-    return entries, #notes > 0 and table.concat(notes, "\n") or nil
+    return entries
 end
 
 -- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained.
@@ -473,9 +447,9 @@ local function BuildSections(fight)
 
     -- Fights saved before mana-saved tracking have no saved table; skip the section for those.
     if fight.saved then
-        local savedEntries, note = BuildSavedEntries(fight.saved)
+        local savedEntries = BuildSavedEntries(fight.saved)
         table.insert(sections, { title = "Mana saved", hex = SAVED_HEX, r = SAVED_R, g = SAVED_G, b = SAVED_B,
-            sign = "", countLabel = "Casts", valueLabel = "Mana", entries = savedEntries, note = note })
+            sign = "", countLabel = "Casts", valueLabel = "Mana", entries = savedEntries })
     end
 
     table.insert(sections, { title = "Mana drained", hex = DRAIN_HEX, r = DRAIN_R, g = DRAIN_G, b = DRAIN_B,
@@ -537,7 +511,7 @@ local function ShowSections(fight)
         end
     end
 
-    local y, rowIndex, noteIndex = 0, 0, 0
+    local y, rowIndex = 0, 0
     for s, section in ipairs(sections) do
         if s > 1 then y = y + SECTION_GAP end
 
@@ -624,23 +598,10 @@ local function ShowSections(fight)
             row:Show()
             y = y + SPELL_ROW_HEIGHT
         end
-
-        -- Optional wrapped note under the rows (e.g. advice in the Mana saved section).
-        if section.note then
-            noteIndex = noteIndex + 1
-            local note = GetNoteString(noteIndex)
-            note:ClearAllPoints()
-            note:SetPoint("TOPLEFT", 4, -(y + 4))
-            note:SetWidth(detailWidth - 8)
-            note:SetText(section.note)
-            note:Show()
-            y = y + note:GetStringHeight() + 8
-        end
     end
 
     for i = #sections + 1, #sectionHeaders do sectionHeaders[i]:Hide() end
     for i = rowIndex + 1, #entryRows do entryRows[i]:Hide() end
-    for i = noteIndex + 1, #noteStrings do noteStrings[i]:Hide() end
     return y
 end
 
