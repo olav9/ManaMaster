@@ -176,30 +176,42 @@ end
 
 -- The sections for a fight: spent, gained and drained (sorted by mana), then regen buff uptime.
 local function BuildSections(fight)
-    -- Mana gained: measured recovery when mana was readable (all sources combined), otherwise the regen estimate.
-    -- Potions, runes and gems, estimated from their descriptions. When mana was readable, the measured
-    -- recovery below already includes them, so skip these to avoid counting them twice.
-    local gained = fight.recovered and {} or ns.SortedEntries(fight.gains)
-    for _, entry in ipairs(gained) do
-        entry.rank = entry.rank and (entry.rank .. ", estimated") or "estimated"
+    -- Mana gained comes in three flavours:
+    --  * gainsMeasured (TBC, combat log): each energize source is exact; passive regen is what the measured
+    --    recovery has left over after those.
+    --  * recovered only (mana readable, no per-source data): one "All mana recovered" row.
+    --  * otherwise (WoW Forever): potions and passive regen are estimates.
+    local gained
+    if fight.gainsMeasured then
+        gained = ns.SortedEntries(fight.gains)
+        local regen = (fight.recovered or 0) - ns.RestoredTotal(fight)
+        if regen >= 1 then
+            table.insert(gained, { name = "Passive regen", rank = "recovered mana not from a logged source",
+                mana = regen, icon = GAIN_ICON })
+        end
+    elseif fight.recovered then
+        gained = {}
+        if fight.recovered > 0 then
+            table.insert(gained, { name = "All mana recovered", mana = fight.recovered, icon = GAIN_ICON })
+        end
+    else
+        gained = ns.SortedEntries(fight.gains)
+        for _, entry in ipairs(gained) do
+            entry.rank = entry.rank and (entry.rank .. ", estimated") or "estimated"
+        end
+        if (fight.regen or 0) > 0 then
+            table.insert(gained, { name = "Passive regen", rank = "estimated", mana = fight.regen, icon = GAIN_ICON })
+        end
     end
-    local gain = fight.recovered or fight.regen or 0
-    if gain > 0 then
-        table.insert(gained, 1, {
-            name = fight.recovered and "All mana recovered" or "Passive regen",
-            rank = not fight.recovered and "estimated" or nil,
-            mana = gain,
-            icon = GAIN_ICON,
-        })
-        table.sort(gained, function(a, b) return a.mana > b.mana end)
-    end
+    table.sort(gained, function(a, b) return a.mana > b.mana end)
 
-    -- Wasted regen goes last, in grey, and isn't counted in the section total since it was never gained.
+    -- Wasted mana goes last, in grey, and isn't counted in the section total since it was never gained.
     -- Fights saved before wasted regen was tracked have no wastedFull.
     if fight.wastedFull then
         if fight.wastedFull >= 1 then
-            table.insert(gained, { name = "Wasted at full mana", rank = "estimated", mana = fight.wastedFull,
-                icon = WASTED_ICON, excluded = true })
+            local name = fight.gainsMeasured and "Overenergized (past max mana)" or "Wasted at full mana"
+            table.insert(gained, { name = name, rank = not fight.gainsMeasured and "estimated" or nil,
+                mana = fight.wastedFull, icon = WASTED_ICON, excluded = true })
         end
         if fight.wastedBlocked >= 1 then
             table.insert(gained, { name = "Wasted while regen blocked", rank = "estimated", mana = fight.wastedBlocked,

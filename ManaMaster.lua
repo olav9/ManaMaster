@@ -276,7 +276,13 @@ local function PrintSummary(fight)
     end
 
     -- Fights saved before wasted regen was tracked have no wastedFull.
-    if fight.wastedFull then
+    if fight.gainsMeasured then
+        -- TBC: exact per-source gains and drains from the combat log.
+        local drained = 0
+        for _, entry in pairs(fight.drains or {}) do drained = drained + entry.mana end
+        print(string.format("  From logged sources %s | Overenergized %s | Drained %s",
+            FormatNumber(RestoredTotal(fight)), FormatNumber(fight.wastedFull), FormatNumber(drained)))
+    elseif fight.wastedFull then
         local wasted = fight.wastedFull + fight.wastedBlocked
         if wasted >= 1 then
             print(string.format("  Wasted regen ~%s (at full mana %s, blocked %s)%s", FormatNumber(wasted),
