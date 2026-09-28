@@ -126,6 +126,46 @@ displayText:SetFont(STANDARD_TEXT_FONT, 64, "OUTLINE")
 displayText:SetTextColor(0.25, 0.66, 0.96)
 displayText:SetPoint("CENTER")
 
+-- Live mana bar under the spent number. The player's mana is secret on WoW Forever, so it can't be read,
+-- but secret values can be handed straight to StatusBar:SetValue and FontString:SetText (via
+-- AbbreviateNumbers) and the client renders them. Never do math or comparisons on the value here.
+local MANA_BAR_WIDTH, MANA_BAR_HEIGHT = 220, 16
+
+local manaBar = CreateFrame("StatusBar", nil, display)
+manaBar:SetSize(MANA_BAR_WIDTH, MANA_BAR_HEIGHT)
+manaBar:SetPoint("TOP", displayText, "BOTTOM", 0, -6)
+manaBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+manaBar:SetStatusBarColor(0.0, 0.44, 0.87)
+
+local manaBarBackground = manaBar:CreateTexture(nil, "BACKGROUND")
+manaBarBackground:SetAllPoints()
+manaBarBackground:SetColorTexture(0, 0, 0, 0.6)
+
+-- Current and max are separate font strings, since a secret value can't be joined into one string.
+local manaBarValue = manaBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+manaBarValue:SetPoint("RIGHT", manaBar, "CENTER", -2, 0)
+local manaBarMax = manaBar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+manaBarMax:SetPoint("LEFT", manaBar, "CENTER", 2, 0)
+
+local manaBarUnavailable = false -- set if the client refuses the secret value, so we stop trying
+
+local function UpdateManaBar()
+    if manaBarUnavailable or not display:IsShown() then return end
+    local ok, err = pcall(function()
+        local maxMana = UnitPowerMax("player", MANA)
+        local mana = UnitPower("player", MANA)
+        manaBar:SetMinMaxValues(0, maxMana)
+        manaBar:SetValue(mana)
+        manaBarValue:SetText(AbbreviateNumbers(mana))
+        manaBarMax:SetText(IsReadable(maxMana) and ("/ " .. BreakUpLargeNumbers(maxMana)) or "")
+    end)
+    if not ok then
+        manaBarUnavailable = true
+        manaBar:Hide()
+        Debug("mana bar unavailable:", tostring(err))
+    end
+end
+
 local displayGeneration = 0 -- lets a pending hide from an old fight skip a newer one
 
 local function UpdateDisplay(spent)
@@ -136,6 +176,7 @@ local function ShowDisplay()
     displayGeneration = displayGeneration + 1
     UpdateDisplay(0)
     display:Show()
+    UpdateManaBar()
 end
 
 local function HideDisplayLater()
@@ -590,6 +631,7 @@ frame:SetScript("OnEvent", function(self, event, ...)
                 "tracking", current and "yes" or "no")
         end
         if powerType == "MANA" then
+            UpdateManaBar()
             if current then
                 OnManaChanged()
             else
@@ -600,6 +642,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
         local _, _, spellID = ...
         Debug(event, "spell", Describe(spellID))
         OnSpellCast(spellID)
+    elseif event == "UNIT_MAXPOWER" then
+        UpdateManaBar()
     elseif event == "UNIT_AURA" then
         if current then
             UpdateAuras(current, GetTime())
@@ -618,6 +662,7 @@ frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:RegisterUnitEvent("UNIT_AURA", "player")
+frame:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 
 -- Debug-only test: addons can't register for the combat log, but can they read the lines Blizzard's
 -- Combat Log chat tab prints? Post-hooks only observe, so they don't taint the tab.
