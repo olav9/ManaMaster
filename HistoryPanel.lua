@@ -18,6 +18,9 @@ local ACCENT_R, ACCENT_G, ACCENT_B = 0.25, 0.66, 0.96
 local GAIN_R, GAIN_G, GAIN_B = 0.3, 0.85, 0.7 -- green-teal for mana gained, apart from the blue spend bars
 local GAIN_HEX = "4dd9b3"
 local GAIN_ICON = "Interface\\Icons\\Spell_Magic_ManaGain"
+local WASTED_R, WASTED_G, WASTED_B = 0.6, 0.6, 0.6 -- grey for regen that was lost, not gained
+local WASTED_HEX = "999999"
+local WASTED_ICON = "Interface\\Icons\\Spell_Magic_ManaGain"
 local DRAIN_R, DRAIN_G, DRAIN_B = 0.9, 0.3, 0.3 -- red for mana burned or drained by enemies
 local DRAIN_HEX = "e64d4d"
 local SPEND_HEX = "40a8f5" -- matches ACCENT
@@ -186,6 +189,19 @@ local function BuildSections(fight)
         table.sort(gained, function(a, b) return a.mana > b.mana end)
     end
 
+    -- Wasted regen goes last, in grey, and isn't counted in the section total since it was never gained.
+    -- Fights saved before wasted regen was tracked have no wastedFull.
+    if fight.wastedFull then
+        if fight.wastedFull >= 1 then
+            table.insert(gained, { name = "Wasted at full mana", rank = "estimated", mana = fight.wastedFull,
+                icon = WASTED_ICON, excluded = true })
+        end
+        if fight.wastedBlocked >= 1 then
+            table.insert(gained, { name = "Wasted while regen blocked", rank = "estimated", mana = fight.wastedBlocked,
+                icon = WASTED_ICON, excluded = true })
+        end
+    end
+
     local sections = {
         { title = "Mana spent", hex = SPEND_HEX, r = ACCENT_R, g = ACCENT_G, b = ACCENT_B, sign = "",
           countLabel = "Casts", valueLabel = "Mana", entries = ns.SortedEntries(fight.spells) },
@@ -244,7 +260,9 @@ local function ShowSections(fight)
         if section.isUptime then
             header.title:SetText("|cff" .. section.hex .. section.title .. "|r")
         else
-            for _, entry in ipairs(section.entries) do total = total + entry.mana end
+            for _, entry in ipairs(section.entries) do
+                if not entry.excluded then total = total + entry.mana end
+            end
             header.title:SetText(string.format("|cff%s%s|r  |cffffffff%s%s|r",
                 section.hex, section.title, total > 0 and section.sign or "", FormatNumber(total)))
         end
@@ -254,6 +272,10 @@ local function ShowSections(fight)
         y = y + SECTION_HEADER_HEIGHT + 2
 
         local entries = section.entries
+        local counted = 0
+        for _, entry in ipairs(entries) do
+            if not entry.excluded then counted = counted + 1 end
+        end
         for _, entry in ipairs(entries) do
             rowIndex = rowIndex + 1
             local row = GetEntryRow(rowIndex)
@@ -262,19 +284,27 @@ local function ShowSections(fight)
             row.name:SetText(entry.name .. (entry.rank and ("  |cff999999" .. entry.rank .. "|r") or ""))
             -- Fights saved before spell IDs were stored only have the name, which finds the icon for known spells.
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
+            row.icon:SetDesaturated(entry.excluded == true)
             row.icon:Show()
             row.casts:SetText(entry.casts or "")
             local fraction
             if section.isUptime then
                 row.mana:SetText(entry.valueText)
                 fraction = entry.fraction
+            elseif entry.excluded then
+                row.mana:SetText("|cff" .. WASTED_HEX .. "~" .. FormatNumber(entry.mana) .. "|r")
+                fraction = entry.mana / top
             else
-                -- Share of the section total, only when there's more than one entry to compare.
-                local share = #entries > 1 and string.format(" (%d%%)", entry.mana / total * 100) or ""
+                -- Share of the section total, only when there's more than one counted entry to compare.
+                local share = counted > 1 and string.format(" (%d%%)", entry.mana / total * 100) or ""
                 row.mana:SetText(section.sign .. FormatNumber(entry.mana) .. share)
                 fraction = entry.mana / top
             end
-            row.bar:SetColorTexture(section.r, section.g, section.b, 0.3)
+            if entry.excluded then
+                row.bar:SetColorTexture(WASTED_R, WASTED_G, WASTED_B, 0.3)
+            else
+                row.bar:SetColorTexture(section.r, section.g, section.b, 0.3)
+            end
             row.bar:SetWidth(math.max(1, DETAIL_WIDTH * fraction))
             row.bar:Show()
             row:Show()
@@ -330,6 +360,13 @@ local function ShowDetail(fight)
             FormatNumber(fight.spent), FormatNumber(fight.regen), net >= 0 and "+" or "-", FormatNumber(math.abs(net))))
     else
         detail.stats:SetText("Spent " .. FormatNumber(fight.spent) .. "  |cff888888(from spell costs)|r")
+    end
+
+    -- Starting mana drives the wasted-regen estimate, so show where it came from.
+    if fight.startMana and fight.wastedFull then
+        local startText = fight.startManaAssumed and "assumed full (not readable)"
+            or string.format("%d%%", fight.startMana / fight.maxMana * 100 + 0.5)
+        detail.stats:SetText(detail.stats:GetText() .. "\n|cff888888Start mana " .. startText .. "|r")
     end
 
     detail.sections:Show()
