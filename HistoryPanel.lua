@@ -1,10 +1,13 @@
 local _, ns = ...
 
-local PANEL_WIDTH = 680
-local PANEL_HEIGHT = 420
-local LIST_WIDTH = 260
-local DETAIL_LEFT = 12 + LIST_WIDTH + 38 -- leaves room for the list's scroll bar
-local DETAIL_WIDTH = PANEL_WIDTH - DETAIL_LEFT - 34
+-- The panel is resizable; its size is saved in ManaMasterDB.panelWidth/panelHeight.
+local PANEL_WIDTH, PANEL_HEIGHT = 680, 420 -- default size
+local MIN_WIDTH, MIN_HEIGHT = 560, 300
+local MAX_WIDTH, MAX_HEIGHT = 1600, 1200
+local LIST_SHARE = 0.4 -- share of the panel width given to the fight list...
+-- ...within these limits. The list stops growing at 320 (an 800-wide panel); any width beyond that goes
+-- to the details pane, which is where long spell names and labels need the room.
+local LIST_MIN_WIDTH, LIST_MAX_WIDTH = 240, 320
 local ROW_HEIGHT = 42
 local ROW_GAP = 2 -- space between fight rows
 local ROW_PAD_X = 12 -- inner padding of fight rows
@@ -32,6 +35,7 @@ local SECTION_GAP = 12 -- space above each section after the first
 local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete buttons
 
 local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
+local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
 local rows, entryRows, sectionHeaders = {}, {}, {}
 local selectedFight -- kept as a table reference so it survives new fights being added
 
@@ -122,7 +126,7 @@ local function GetSectionHeader(i)
     if sectionHeaders[i] then return sectionHeaders[i] end
 
     local header = CreateFrame("Frame", nil, detail.sections)
-    header:SetSize(DETAIL_WIDTH, SECTION_HEADER_HEIGHT)
+    header:SetHeight(SECTION_HEADER_HEIGHT) -- width follows the panel, set in ShowSections
 
     header.manaLabel = header:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     header.manaLabel:SetPoint("RIGHT", -4, 0)
@@ -142,7 +146,7 @@ local function GetEntryRow(i)
     if entryRows[i] then return entryRows[i] end
 
     local row = CreateFrame("Frame", nil, detail.sections)
-    row:SetSize(DETAIL_WIDTH, SPELL_ROW_HEIGHT)
+    row:SetHeight(SPELL_ROW_HEIGHT) -- width follows the panel, set in ShowSections
 
     -- Bar length shows the entry's mana relative to the largest entry in any section.
     row.bar = row:CreateTexture(nil, "BACKGROUND")
@@ -273,6 +277,7 @@ local function ShowSections(fight)
         local header = GetSectionHeader(s)
         header:ClearAllPoints()
         header:SetPoint("TOPLEFT", 0, -y)
+        header:SetWidth(detailWidth)
         local total = 0
         if section.isUptime then
             header.title:SetText("|cff" .. section.hex .. section.title .. "|r")
@@ -298,6 +303,7 @@ local function ShowSections(fight)
             local row = GetEntryRow(rowIndex)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
+            row:SetWidth(detailWidth)
             row.name:SetText(entry.name .. (entry.rank and ("  |cff999999" .. entry.rank .. "|r") or ""))
             -- Fights saved before spell IDs were stored only have the name, which finds the icon for known spells.
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
@@ -322,7 +328,7 @@ local function ShowSections(fight)
             else
                 row.bar:SetColorTexture(section.r, section.g, section.b, 0.3)
             end
-            row.bar:SetWidth(math.max(1, DETAIL_WIDTH * fraction))
+            row.bar:SetWidth(math.max(1, detailWidth * fraction))
             row.bar:Show()
             row:Show()
             y = y + SPELL_ROW_HEIGHT
@@ -333,6 +339,7 @@ local function ShowSections(fight)
             local row = GetEntryRow(rowIndex)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
+            row:SetWidth(detailWidth)
             row.name:SetText("|cff888888None recorded|r")
             row.icon:Hide()
             row.casts:SetText("")
@@ -457,10 +464,34 @@ StaticPopupDialogs["MANAMASTER_CLEAR_HISTORY"] = {
     preferredIndex = 3,
 }
 
+-- Splits the panel's width between the fight list and the details pane, and resizes both.
+local function UpdateLayout()
+    local width = panel:GetWidth()
+    listWidth = math.floor(math.min(LIST_MAX_WIDTH, math.max(LIST_MIN_WIDTH, width * LIST_SHARE)))
+    local detailLeft = 12 + listWidth + 38 -- leaves room for the list's scroll bar
+    detailWidth = math.floor(width - detailLeft - 34)
+
+    listScroll:SetWidth(listWidth)
+    listContent:SetWidth(listWidth)
+    detailScroll:ClearAllPoints()
+    detailScroll:SetPoint("TOPLEFT", detailLeft, -32)
+    detailScroll:SetPoint("BOTTOMLEFT", detailLeft, BUTTON_AREA)
+    detailScroll:SetWidth(detailWidth)
+    detailContent:SetWidth(detailWidth)
+    detail.sections:SetWidth(detailWidth)
+end
+
 local function CreatePanel()
     panel = CreateFrame("Frame", "ManaMasterHistoryFrame", UIParent, "BasicFrameTemplateWithInset")
-    panel:SetSize(PANEL_WIDTH, PANEL_HEIGHT)
+    panel:SetSize(ns.db.panelWidth or PANEL_WIDTH, ns.db.panelHeight or PANEL_HEIGHT)
     panel:SetPoint("CENTER")
+    panel:SetResizable(true)
+    if panel.SetResizeBounds then
+        panel:SetResizeBounds(MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT)
+    else
+        panel:SetMinResize(MIN_WIDTH, MIN_HEIGHT) -- older clients
+        panel:SetMaxResize(MAX_WIDTH, MAX_HEIGHT)
+    end
     panel:SetFrameStrata("HIGH") -- below DIALOG so the clear confirmation shows on top
     panel:SetMovable(true)
     panel:SetClampedToScreen(true)
@@ -472,20 +503,17 @@ local function CreatePanel()
     panel.TitleText:SetText("ManaMaster - Fight History")
     tinsert(UISpecialFrames, panel:GetName()) -- close with Escape
 
+    -- Widths are set by UpdateLayout once everything exists.
     listScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
     listScroll:SetPoint("TOPLEFT", 12, -32)
     listScroll:SetPoint("BOTTOMLEFT", 12, BUTTON_AREA)
-    listScroll:SetWidth(LIST_WIDTH)
     listContent = CreateFrame("Frame", nil, listScroll)
-    listContent:SetSize(LIST_WIDTH, 1)
+    listContent:SetHeight(1)
     listScroll:SetScrollChild(listContent)
 
     detailScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
-    detailScroll:SetPoint("TOPLEFT", DETAIL_LEFT, -32)
-    detailScroll:SetPoint("BOTTOMLEFT", DETAIL_LEFT, BUTTON_AREA)
-    detailScroll:SetWidth(DETAIL_WIDTH)
     detailContent = CreateFrame("Frame", nil, detailScroll)
-    detailContent:SetSize(DETAIL_WIDTH, 1)
+    detailContent:SetHeight(1)
     detailScroll:SetScrollChild(detailContent)
 
     -- Always open on the newest fight, scrolled to the top, rather than whatever was viewed last time.
@@ -509,7 +537,7 @@ local function CreatePanel()
 
     -- Section headings and entry rows are laid out inside this frame, top to bottom.
     detail.sections = CreateFrame("Frame", nil, detailContent)
-    detail.sections:SetSize(DETAIL_WIDTH, 1)
+    detail.sections:SetHeight(1)
     detail.sections:SetPoint("TOPLEFT", detail.stats, "BOTTOMLEFT", 0, -14)
 
     clearButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
@@ -522,11 +550,33 @@ local function CreatePanel()
 
     deleteButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     deleteButton:SetSize(120, 22)
-    deleteButton:SetPoint("BOTTOMRIGHT", -12, 12)
+    deleteButton:SetPoint("BOTTOMRIGHT", -28, 12) -- leaves the corner for the resize grip
     deleteButton:SetText("Delete segment")
     deleteButton:SetScript("OnClick", function()
         DeleteFight(selectedFight)
     end)
+
+    -- Resize grip in the bottom-right corner, like the chat windows'.
+    local grip = CreateFrame("Button", nil, panel)
+    grip:SetSize(16, 16)
+    grip:SetPoint("BOTTOMRIGHT", -6, 6)
+    grip:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Up")
+    grip:SetHighlightTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Highlight")
+    grip:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIM-SizeGrabber-Down")
+    grip:SetScript("OnMouseDown", function()
+        panel:StartSizing("BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        panel:StopMovingOrSizing()
+        ns.db.panelWidth, ns.db.panelHeight = math.floor(panel:GetWidth()), math.floor(panel:GetHeight())
+    end)
+
+    -- Re-lay out both panes whenever the size changes, including while dragging the grip.
+    panel:SetScript("OnSizeChanged", function()
+        UpdateLayout()
+        ns.RefreshHistory()
+    end)
+    UpdateLayout()
 end
 
 function ns.ToggleHistory()
