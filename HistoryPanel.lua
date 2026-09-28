@@ -293,7 +293,7 @@ local function GetEntryRow(i)
     return row
 end
 
--- The sections for a fight: spent, gained and drained (sorted by mana), then regen buff uptime.
+-- The sections for a fight, top to bottom: spent, gained, regen buff uptime, drained.
 local function BuildSections(fight)
     -- Mana gained comes in three flavours:
     --  * gainsMeasured (TBC, combat log): each energize source is exact; passive regen is what the measured
@@ -343,10 +343,9 @@ local function BuildSections(fight)
           countLabel = "Casts", valueLabel = "Mana", entries = ns.SortedEntries(fight.spells) },
         { title = "Mana gained", hex = GAIN_HEX, r = GAIN_R, g = GAIN_G, b = GAIN_B, sign = "+",
           countLabel = "Count", valueLabel = "Mana", entries = gained },
-        { title = "Mana drained", hex = DRAIN_HEX, r = DRAIN_R, g = DRAIN_G, b = DRAIN_B, sign = "-",
-          countLabel = "Count", valueLabel = "Mana", entries = ns.SortedEntries(fight.drains) },
     }
 
+    -- Regen buff uptime sits right under Mana gained, since the buffs explain much of the gains.
     -- Fights saved before buff tracking have no buffs table; skip the section for those.
     if fight.buffs then
         local buffs = {}
@@ -365,6 +364,9 @@ local function BuildSections(fight)
         table.insert(sections, { title = "Regen buff uptime", hex = BUFF_HEX, r = BUFF_R, g = BUFF_G, b = BUFF_B,
             countLabel = "Time", valueLabel = "Uptime", isUptime = true, entries = buffs })
     end
+
+    table.insert(sections, { title = "Mana drained", hex = DRAIN_HEX, r = DRAIN_R, g = DRAIN_G, b = DRAIN_B,
+        sign = "-", countLabel = "Count", valueLabel = "Mana", entries = ns.SortedEntries(fight.drains) })
 
     return sections
 end
