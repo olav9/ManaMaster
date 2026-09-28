@@ -1,0 +1,12 @@
+## Interface: 20506
+## Title: ManaMaster
+## Notes: Mana tracking and management
+## Author: olsen
+## Version: 0.1.0
+## SavedVariables: ManaMasterDB
+## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
+
+ManaMaster.lua
+Mana_TBC.lua
+HistoryPanel.lua
+MinimapButton.lua
