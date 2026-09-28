@@ -5,6 +5,7 @@ local MAX_HISTORY = 50
 local PRECOMBAT_WINDOW = 3 -- seconds before combat whose casts count toward the fight
 local FIVE_SECOND_RULE = 5 -- seconds after spending mana that regen stays at the reduced casting rate
 local REGEN_UPDATE_INTERVAL = 1 -- seconds between regen estimate updates during a fight
+local MAX_AURA_SCAN = 64 -- buff slots to check; a slot that errors doesn't tell us whether more follow
 local PREFIX = "|cff3fa9f5ManaMaster|r "
 
 -- Buffs whose uptime is tracked per fight, by English name so every rank matches. Add names here to track more.
@@ -234,23 +235,28 @@ local function AddCast(fight, spellID, cost)
     entry.mana = entry.mana + cost
 end
 
--- Returns the tracked regen buffs currently on the player: name -> { spellID, icon }.
+-- Returns the tracked regen buffs currently on the player (name -> { spellID, icon }) and how many
+-- buffs couldn't be read. In combat, GetAuraDataByIndex throws on buffs the game marks secret
+-- (e.g. Blood Fury) instead of returning them, so each slot is read in a pcall and skipped on error.
 local function ScanRegenBuffs()
     local found, hidden = {}, 0
-    local i = 1
-    while true do
-        local aura = C_UnitAuras.GetAuraDataByIndex("player", i, "HELPFUL")
-        if not aura then break end
-        local name = aura.name
-        if not IsReadable(name) then
+    for i = 1, MAX_AURA_SCAN do
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, "HELPFUL")
+        if not ok then
             hidden = hidden + 1
-        elseif REGEN_BUFFS[name] then
-            found[name] = {
-                spellID = IsReadable(aura.spellId) and aura.spellId or nil,
-                icon = IsReadable(aura.icon) and aura.icon or nil,
-            }
+        elseif not aura then
+            break -- past the last buff
+        else
+            local name = aura.name
+            if not IsReadable(name) then
+                hidden = hidden + 1
+            elseif REGEN_BUFFS[name] then
+                found[name] = {
+                    spellID = IsReadable(aura.spellId) and aura.spellId or nil,
+                    icon = IsReadable(aura.icon) and aura.icon or nil,
+                }
+            end
         end
-        i = i + 1
     end
     return found, hidden
 end
