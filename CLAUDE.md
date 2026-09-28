@@ -56,6 +56,7 @@ Findings, from TBC with a level 70 elemental shaman:
 
 ## How tracking works
 
+- Mana casts in the 10 seconds before combat starts (`PRECOMBAT_WINDOW`) count toward the fight, which covers pull casts and pre-pull setup such as dropping totems.
 - A fight starts on `PLAYER_REGEN_DISABLED` or `ENCOUNTER_START`. It ends on `PLAYER_REGEN_ENABLED`, or on `ENCOUNTER_END` if a boss encounter is active.
 - Total spent/recovered comes from `UNIT_POWER_FREQUENT` mana deltas. The per-spell breakdown comes from `UNIT_SPELLCAST_SUCCEEDED` plus `C_Spell.GetSpellPowerCost`.
 - The combat log (`COMBAT_LOG_EVENT_UNFILTERED`) is not available. On WoW Forever, registering for it triggers the "blocked from an action only available to the Blizzard UI" pop-up (confirmed in game). Don't register it, not even behind a debug flag.
