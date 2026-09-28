@@ -140,7 +140,7 @@ local function CombineFights(fights)
         maxMana = 100, -- lowestMana below is a percentage, so the panel's lowest % works unchanged
     }
     local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
-        gainsMeasured = true, buffs = true, lowestMana = true, saved = true }
+        gainsMeasured = true, buffs = true, lowestMana = true, saved = true, regenSplit = true }
     local zones, zoneList = {}, {}
 
     for _, fight in ipairs(fights) do
@@ -155,6 +155,13 @@ local function CombineFights(fights)
         if fight.lowestMana and fight.maxMana and fight.maxMana > 0 then
             local pct = fight.lowestMana / fight.maxMana * 100
             combined.lowestMana = math.min(combined.lowestMana or pct, pct)
+        end
+        if fight.regenSplit then
+            combined.regenSplit = combined.regenSplit
+                or { castingTime = 0, fullTime = 0, castingRegen = 0, fullRegen = 0 }
+            for field, value in pairs(fight.regenSplit) do
+                combined.regenSplit[field] = combined.regenSplit[field] + value
+            end
         end
         MergeEntries(combined.spells, fight.spells)
         MergeEntries(combined.gains, fight.gains)
@@ -368,6 +375,68 @@ local function BuildSavedEntries(saved)
     return entries
 end
 
+-- The Passive regen row plus indented rows for what makes it up, biggest first: each regen buff with a known
+-- mana per 5 sec (estimated over its uptime), and the rest split into "Regen while casting" and "Full regen"
+-- by the five-second rule (or one "Spirit and base regen" row for fights without that data). Buffs whose regen arrives as
+-- logged periodic ticks (e.g. Mana Spring on TBC) already have their own gain row, so they're left out;
+-- one-off logged gains (e.g. Water Shield orbs) don't cover a buff's passive mp5, so those buffs stay in.
+-- The buff estimates ignore regen lost at full mana, so if they add up to more than the total they're
+-- scaled down to fit, keeping the children equal to the parent.
+local function PassiveRegenGroup(fight, passive, passiveRank)
+    local coveredByTicks = {}
+    for _, entry in pairs(fight.gainsMeasured and fight.gains or {}) do
+        -- nil means a fight saved before ticks were told apart; treat it as covered to avoid double counting.
+        if entry.periodic ~= false then coveredByTicks[entry.name] = true end
+    end
+
+    local children, estimated = {}, 0
+    for name, data in pairs(fight.buffs or {}) do
+        if data.mp5 and (data.uptime or 0) > 0 and not coveredByTicks[name] then
+            local mana = data.mp5 / 5 * data.uptime
+            estimated = estimated + mana
+            table.insert(children, { name = name, icon = data.icon, spellID = data.spellID,
+                rank = ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana, child = true })
+        end
+    end
+
+    local scale = estimated > passive and passive / estimated or 1
+    for _, child in ipairs(children) do child.mana = child.mana * scale end
+    local buffTotal = estimated * scale
+    local rest = passive - buffTotal
+
+    -- Split the rest (spirit, gear and base regen) by the five-second rule, in proportion to the regen the
+    -- game's rates predicted for each window (fight.regenSplit, from ManaMaster.lua). mp5 buffs apply in both
+    -- windows, so their share (by time) is taken out of each prediction first.
+    local split = fight.regenSplit
+    local totalTime = split and (split.castingTime + split.fullTime) or 0
+    local baseCasting, baseFull = 0, 0
+    if totalTime > 0 then
+        baseCasting = math.max(0, split.castingRegen - buffTotal * split.castingTime / totalTime)
+        baseFull = math.max(0, split.fullRegen - buffTotal * split.fullTime / totalTime)
+    end
+    if rest >= 1 and baseCasting + baseFull > 0 then
+        local casting = rest * baseCasting / (baseCasting + baseFull)
+        local FormatDuration = ns.FormatDuration
+        if casting >= 1 then
+            table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, child = true, mana = casting,
+                rank = FormatDuration(split.castingTime) .. " within the 5-second rule  ·  estimated split" })
+        end
+        if rest - casting >= 1 then
+            table.insert(children, { name = "Full regen", icon = GAIN_ICON, child = true, mana = rest - casting,
+                rank = FormatDuration(split.fullTime) .. " outside the 5-second rule  ·  estimated split" })
+        end
+    elseif rest >= 1 and #children > 0 then
+        table.insert(children, { name = "Spirit and base regen", rank = "the rest", mana = rest, icon = GAIN_ICON,
+            child = true })
+    end
+
+    -- Biggest first, so the main contributor is at the top.
+    table.sort(children, function(a, b) return a.mana > b.mana end)
+    local group = { { name = "Passive regen", rank = passiveRank, mana = passive, icon = GAIN_ICON } }
+    for _, child in ipairs(children) do table.insert(group, child) end
+    return group
+end
+
 -- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained.
 local function BuildSections(fight)
     -- Mana gained comes in three flavours:
@@ -375,14 +444,11 @@ local function BuildSections(fight)
     --    recovery has left over after those.
     --  * recovered only (mana readable, no per-source data): one "All mana recovered" row.
     --  * otherwise (WoW Forever): potions and passive regen are estimates.
-    local gained
+    local gained, passive, passiveRank
     if fight.gainsMeasured then
         gained = ns.SortedEntries(fight.gains)
-        local regen = (fight.recovered or 0) - ns.RestoredTotal(fight)
-        if regen >= 1 then
-            table.insert(gained, { name = "Passive regen", rank = "recovered mana not from a logged source",
-                mana = regen, icon = GAIN_ICON })
-        end
+        passive = (fight.recovered or 0) - ns.RestoredTotal(fight)
+        passiveRank = "recovered mana not from a logged source"
     elseif fight.recovered then
         gained = {}
         if fight.recovered > 0 then
@@ -393,11 +459,22 @@ local function BuildSections(fight)
         for _, entry in ipairs(gained) do
             entry.rank = entry.rank and (entry.rank .. ", estimated") or "estimated"
         end
-        if (fight.regen or 0) > 0 then
-            table.insert(gained, { name = "Passive regen", rank = "estimated", mana = fight.regen, icon = GAIN_ICON })
-        end
+        passive = fight.regen
+        passiveRank = "estimated"
     end
     table.sort(gained, function(a, b) return a.mana > b.mana end)
+
+    -- Passive regen and its breakdown go in at the position its total sorts to, kept together.
+    if passive and passive >= 1 then
+        local group = PassiveRegenGroup(fight, passive, passiveRank)
+        local at = #gained + 1
+        for i, entry in ipairs(gained) do
+            if entry.mana < passive then at = i break end
+        end
+        for offset, entry in ipairs(group) do
+            table.insert(gained, at + offset - 1, entry)
+        end
+    end
 
     -- Wasted mana goes last, in grey, and isn't counted in the section total since it was never gained.
     -- Fights saved before wasted regen was tracked have no wastedFull.

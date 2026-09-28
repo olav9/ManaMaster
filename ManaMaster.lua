@@ -567,6 +567,42 @@ local function UpdateAuras(fight, now)
     end
 end
 
+-- Regen split by the five-second rule, for both clients: how long each fight spent within 5 s of a mana
+-- spend (regen at the reduced casting rate) versus outside it (full regen), and the regen GetManaRegen's
+-- rates predict for each. The panel uses the ratio to split passive regen into "while casting" and "full".
+local FIVE_SECOND_RULE = 5
+local SPLIT_UPDATE_INTERVAL = 1
+local lastSpendTime = 0 -- GetTime() of the last cast that cost mana, in or out of combat
+local splitRates -- last readable GetManaRegen() values: { inactive, active }
+
+local function ReadSplitRates()
+    if not GetManaRegen then return end
+    local inactive, active = GetManaRegen()
+    if IsReadable(inactive) and IsReadable(active) then
+        splitRates = { inactive = inactive, active = active }
+    end
+end
+
+-- Adds the time since fight.splitClock to the casting or full window. Call before changing lastSpendTime.
+local function AccumulateRegenSplit(fight, now)
+    local from = fight.splitClock
+    fight.splitClock = now
+    if not from or not splitRates or now <= from then return end
+    local castingTime = math.max(0, math.min(now, lastSpendTime + FIVE_SECOND_RULE) - from)
+    local fullTime = (now - from) - castingTime
+    local split = fight.regenSplit
+    split.castingTime = split.castingTime + castingTime
+    split.fullTime = split.fullTime + fullTime
+    split.castingRegen = split.castingRegen + castingTime * splitRates.active
+    split.fullRegen = split.fullRegen + fullTime * splitRates.inactive
+end
+
+C_Timer.NewTicker(SPLIT_UPDATE_INTERVAL, function()
+    if not ns.current then return end
+    ReadSplitRates()
+    AccumulateRegenSplit(ns.current, GetTime())
+end)
+
 local function StartFight(encounterName)
     local current = ns.current
     if current then
@@ -602,9 +638,13 @@ local function StartFight(encounterName)
         castSpent = 0, -- sum of listed spell costs, used when mana is hidden
         manaHidden = mana == nil,
         spells = {},
-        saved = {}, -- mana saved by cost reducers, keyed by spell ID: { casts, mana, normalCost, sources }
+        saved = {}, -- mana saved by cost reducers, keyed by buff: see RecordSaving
         buffs = {}, -- regen buff name -> { uptime, spellID, icon, since }
+        -- Time and predicted regen within the five-second rule (casting) and outside it (full regen).
+        regenSplit = { castingTime = 0, fullTime = 0, castingRegen = 0, fullRegen = 0 },
+        splitClock = now,
     }
+    ReadSplitRates()
     -- The client file sets its mana fields before the fight becomes current, so anything it settles up to
     -- now (like out-of-combat regen) isn't counted toward this fight.
     ns.Mana.OnFightStart(fight, now)
@@ -639,6 +679,8 @@ local function EndFight(success)
     if not fight then return end
     local now = GetTime()
     ns.Mana.OnFightEnd(fight, now) -- while the fight is still current, so the last stretch is booked to it
+    AccumulateRegenSplit(fight, now)
+    fight.splitClock = nil
     ns.current = nil
 
     -- Close any buff still running when the fight ends.
@@ -734,6 +776,9 @@ local function OnSpellCast(spellID, castGUID)
     RecordSaving(ns.current, spellID, cost, snap, reducersAfter)
     if cost <= 0 then return end
     ns.Mana.OnManaSpend(cost, now)
+    -- Close the regen-split interval under the old five-second-rule state, then restart the rule.
+    if ns.current then AccumulateRegenSplit(ns.current, now) end
+    lastSpendTime = now
 
     if ns.current then
         AddCast(ns.current, spellID, cost)

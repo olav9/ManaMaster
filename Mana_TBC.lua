@@ -27,6 +27,7 @@ local function AddEntry(entries, spellID, spellName, amount, rank)
     end
     entry.casts = entry.casts + 1
     entry.mana = entry.mana + amount
+    return entry
 end
 
 -- Combat log fields after the 11 base ones (timestamp ... destRaidFlags):
@@ -50,7 +51,11 @@ local function OnCombatLogEvent()
         local overEnergize, powerType = arg16 or 0, arg17
         if powerType ~= MANA then return end
         -- amount is what was gained; overEnergize is what didn't fit under max mana.
-        AddEntry(fight.gains, spellID, spellName, amount)
+        local entry = AddEntry(fight.gains, spellID, spellName, amount)
+        -- Periodic ticks (e.g. Mana Spring) are a buff's whole regen, so the panel's passive-regen breakdown
+        -- leaves that buff out; one-off energizes (e.g. Water Shield orbs) don't cover its passive mp5.
+        -- Stored as true/false (nil only in fights saved before this was tracked).
+        entry.periodic = entry.periodic or subevent == "SPELL_PERIODIC_ENERGIZE"
         fight.wastedFull = fight.wastedFull + overEnergize
         ns.Debug("energize", spellName, amount, overEnergize > 0 and ("(" .. overEnergize .. " over)") or "")
     elseif DRAIN_EVENTS[subevent] then
