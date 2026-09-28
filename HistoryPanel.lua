@@ -31,7 +31,7 @@ local SECTION_GAP = 12 -- space above each section after the first
 
 local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete buttons
 
-local panel, listContent, detailContent, detail, clearButton, deleteButton
+local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
 local rows, entryRows, sectionHeaders = {}, {}, {}
 local selectedFight -- kept as a table reference so it survives new fights being added
 
@@ -177,7 +177,12 @@ end
 -- The sections for a fight: spent, gained and drained (sorted by mana), then regen buff uptime.
 local function BuildSections(fight)
     -- Mana gained: measured recovery when mana was readable (all sources combined), otherwise the regen estimate.
-    local gained = ns.SortedEntries(fight.gains)
+    -- Potions, runes and gems, estimated from their descriptions. When mana was readable, the measured
+    -- recovery below already includes them, so skip these to avoid counting them twice.
+    local gained = fight.recovered and {} or ns.SortedEntries(fight.gains)
+    for _, entry in ipairs(gained) do
+        entry.rank = entry.rank and (entry.rank .. ", estimated") or "estimated"
+    end
     local gain = fight.recovered or fight.regen or 0
     if gain > 0 then
         table.insert(gained, 1, {
@@ -354,18 +359,21 @@ local function ShowDetail(fight)
             FormatNumber(fight.spent), FormatNumber(fight.recovered),
             net >= 0 and "+" or "-", FormatNumber(math.abs(net)), lowestPct))
     elseif fight.regen then
-        -- Mana was hidden: spent is from spell costs and regen is estimated.
-        local net = fight.regen - fight.spent
-        detail.stats:SetText(string.format("Spent %s   Regen ~%s   Net %s%s\n|cff888888Spent from spell costs, regen estimated|r",
-            FormatNumber(fight.spent), FormatNumber(fight.regen), net >= 0 and "+" or "-", FormatNumber(math.abs(net))))
+        -- Mana was hidden: spent is from spell costs, regen and potions are estimated.
+        local restored = ns.RestoredTotal(fight)
+        local net = fight.regen + restored - fight.spent
+        local restoredText = restored > 0 and ("   Potions ~" .. FormatNumber(restored)) or ""
+        detail.stats:SetText(string.format("Spent %s   Regen ~%s%s   Net %s%s\n|cff888888Spent from spell costs, regen and potions estimated|r",
+            FormatNumber(fight.spent), FormatNumber(fight.regen), restoredText,
+            net >= 0 and "+" or "-", FormatNumber(math.abs(net))))
     else
         detail.stats:SetText("Spent " .. FormatNumber(fight.spent) .. "  |cff888888(from spell costs)|r")
     end
 
     -- Starting mana drives the wasted-regen estimate, so show where it came from.
     if fight.startMana and fight.wastedFull then
-        local startText = fight.startManaAssumed and "assumed full (not readable)"
-            or string.format("%d%%", fight.startMana / fight.maxMana * 100 + 0.5)
+        local startText = fight.startManaAssumed and "assumed full (not confirmed since login)"
+            or string.format("~%d%% (estimated)", fight.startMana / fight.maxMana * 100 + 0.5)
         detail.stats:SetText(detail.stats:GetText() .. "\n|cff888888Start mana " .. startText .. "|r")
     end
 
@@ -375,6 +383,17 @@ local function ShowDetail(fight)
     local height = detail.title:GetStringHeight() + 4 + detail.info:GetStringHeight() + 8
         + detail.stats:GetStringHeight() + 14 + sectionsHeight
     detailContent:SetHeight(height)
+end
+
+-- Selects the newest fight and scrolls both panes to the top. Used when the panel opens, and when a
+-- fight ends while it's open so the new segment is shown straight away. Does nothing while it's closed.
+function ns.ShowNewestFight()
+    if not panel or not panel:IsShown() then return end
+    local fights = ns.db.fights
+    selectedFight = fights[#fights]
+    listScroll:SetVerticalScroll(0)
+    detailScroll:SetVerticalScroll(0)
+    ns.RefreshHistory()
 end
 
 function ns.RefreshHistory()
@@ -441,7 +460,7 @@ local function CreatePanel()
     panel.TitleText:SetText("ManaMaster - Fight History")
     tinsert(UISpecialFrames, panel:GetName()) -- close with Escape
 
-    local listScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
+    listScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
     listScroll:SetPoint("TOPLEFT", 12, -32)
     listScroll:SetPoint("BOTTOMLEFT", 12, BUTTON_AREA)
     listScroll:SetWidth(LIST_WIDTH)
@@ -449,7 +468,7 @@ local function CreatePanel()
     listContent:SetSize(LIST_WIDTH, 1)
     listScroll:SetScrollChild(listContent)
 
-    local detailScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
+    detailScroll = CreateFrame("ScrollFrame", nil, panel, "UIPanelScrollFrameTemplate")
     detailScroll:SetPoint("TOPLEFT", DETAIL_LEFT, -32)
     detailScroll:SetPoint("BOTTOMLEFT", DETAIL_LEFT, BUTTON_AREA)
     detailScroll:SetWidth(DETAIL_WIDTH)
@@ -458,13 +477,7 @@ local function CreatePanel()
     detailScroll:SetScrollChild(detailContent)
 
     -- Always open on the newest fight, scrolled to the top, rather than whatever was viewed last time.
-    panel:SetScript("OnShow", function()
-        local fights = ns.db.fights
-        selectedFight = fights[#fights]
-        listScroll:SetVerticalScroll(0)
-        detailScroll:SetVerticalScroll(0)
-        ns.RefreshHistory()
-    end)
+    panel:SetScript("OnShow", ns.ShowNewestFight)
 
     detail = {}
     detail.title = detailContent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
