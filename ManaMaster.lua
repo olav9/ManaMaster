@@ -55,6 +55,7 @@ local function IsReadable(value)
 end
 
 local debugMode = false -- not saved; turn on with /mm debug
+local lastPowerDebugState -- "hidden" or "readable", so power-event debug lines only print on a change
 
 local function Debug(...)
     if debugMode then
@@ -581,8 +582,13 @@ frame:SetScript("OnEvent", function(self, event, ...)
         EndFight(success == 1)
     elseif event == "UNIT_POWER_FREQUENT" then
         local unit, powerType = ...
-        Debug(event, Describe(unit), Describe(powerType), "mana", Describe(UnitPower("player", MANA)),
-            "tracking", current and "yes" or "no")
+        -- These fire several times a second, so only log when mana switches between hidden and readable.
+        local manaState = Describe(UnitPower("player", MANA)) == "SECRET" and "hidden" or "readable"
+        if manaState ~= lastPowerDebugState then
+            lastPowerDebugState = manaState
+            Debug(event, Describe(unit), Describe(powerType), "mana now", manaState,
+                "tracking", current and "yes" or "no")
+        end
         if powerType == "MANA" then
             if current then
                 OnManaChanged()
@@ -613,45 +619,67 @@ frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:RegisterUnitEvent("UNIT_AURA", "player")
 
--- Debug-only check of whether this client lets addons read the combat log. If it does, mana gains
--- (potions, totems, procs) and drains aimed at the player could be measured exactly from it.
-local probe = CreateFrame("Frame")
-local PROBE_SUBEVENTS = {
-    SPELL_ENERGIZE = true, SPELL_PERIODIC_ENERGIZE = true,
-    SPELL_DRAIN = true, SPELL_PERIODIC_DRAIN = true,
-    SPELL_LEECH = true, SPELL_PERIODIC_LEECH = true,
-}
-local probeErrorShown = false
+-- Debug-only test: addons can't register for the combat log, but can they read the lines Blizzard's
+-- Combat Log chat tab prints? Post-hooks only observe, so they don't taint the tab.
+-- Reports once whenever lines switch between readable and hidden, and echoes readable lines that
+-- mention mana. Hooks are set when debug is turned on, since Blizzard_CombatLog loads on demand
+-- and may not exist yet when this file loads.
+local COMBAT_TAB_SAMPLE_LINES = 3 -- lines echoed per method after debug is turned on, to show the wording
+local combatTabState = {} -- per "frame:method": last reported "readable"/"hidden", and lines echoed so far
+local hookedFrames = {}
 
-probe:SetScript("OnEvent", function()
-    -- pcall because any field may be secret, and comparing a secret value throws.
-    local ok, err = pcall(function()
-        local info = { CombatLogGetCurrentEventInfo() }
-        local subevent, destGUID = info[2], info[8]
-        if PROBE_SUBEVENTS[subevent] and destGUID == UnitGUID("player") then
-            -- ENERGIZE: 15 amount, 17 power type. DRAIN/LEECH: 15 amount, 16 power type.
-            local powerType = subevent:find("ENERGIZE") and info[17] or info[16]
-            Debug("combat log", subevent, "from", Describe(info[5]), "spell", Describe(info[13]),
-                "amount", Describe(info[15]), "power", Describe(powerType))
+local function OnCombatTabMessage(frameName, method, text)
+    if not debugMode then return end
+    local key = frameName .. ":" .. method
+    local info = combatTabState[key]
+    if not info then
+        info = { echoed = 0 }
+        combatTabState[key] = info
+    end
+
+    local readable = IsReadable(text) and type(text) == "string"
+    local state = readable and "readable" or "hidden"
+    if state ~= info.state then
+        info.state = state
+        Debug("combat log tab lines are", state, "(" .. key .. ")")
+    end
+    if not readable then return end
+
+    if info.echoed < COMBAT_TAB_SAMPLE_LINES then
+        info.echoed = info.echoed + 1
+        Debug("combat log tab sample (" .. method .. "):", text)
+    elseif text:find("[Mm]ana") then
+        Debug("combat log tab:", text)
+    end
+end
+
+local function HookCombatTab()
+    local frames = {}
+    if COMBATLOG then frames[COMBATLOG] = true end
+    if ChatFrame2 then frames[ChatFrame2] = true end
+
+    Debug("COMBATLOG is", COMBATLOG and (COMBATLOG:GetName() or "unnamed frame") or "nil",
+        "| Blizzard_CombatLog loaded:", tostring(C_AddOns and C_AddOns.IsAddOnLoaded("Blizzard_CombatLog")))
+    for i = 1, NUM_CHAT_WINDOWS or 10 do
+        local name, _, _, _, _, _, shown = GetChatWindowInfo(i)
+        if name and name ~= "" then
+            Debug("chat window", i, name, shown and "(shown)" or "")
         end
-    end)
-    if not ok and not probeErrorShown then
-        probeErrorShown = true
-        Debug("combat log read failed:", tostring(err))
     end
-end)
 
-local function SetCombatLogProbe(enabled)
-    if not enabled then
-        probe:UnregisterAllEvents()
-        return
-    end
-    probeErrorShown = false
-    local ok, err = pcall(probe.RegisterEvent, probe, "COMBAT_LOG_EVENT_UNFILTERED")
-    if ok then
-        print(PREFIX .. "combat log check on: gains and drains on you will print as 'combat log' lines")
-    else
-        print(PREFIX .. "combat log not available to addons: " .. tostring(err))
+    for chatFrame in pairs(frames) do
+        if not hookedFrames[chatFrame] then
+            hookedFrames[chatFrame] = true
+            local frameName = chatFrame:GetName() or "unnamed"
+            for _, method in ipairs({ "AddMessage", "BackFillMessage" }) do
+                if chatFrame[method] then
+                    hooksecurefunc(chatFrame, method, function(_, text)
+                        OnCombatTabMessage(frameName, method, text)
+                    end)
+                end
+            end
+            Debug("watching", frameName, "for combat log lines")
+        end
     end
 end
 
@@ -688,7 +716,10 @@ SlashCmdList.MANAMASTER = function(msg)
     elseif msg == "debug" then
         debugMode = not debugMode
         print(PREFIX .. "debug " .. (debugMode and "on" or "off"))
-        SetCombatLogProbe(debugMode)
+        if debugMode then
+            wipe(combatTabState)
+            HookCombatTab()
+        end
     elseif msg == "reset" then
         ns.ClearHistory()
     else
