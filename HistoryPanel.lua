@@ -180,6 +180,7 @@ local function CombineFights(fights)
                 combined.buffs[name] = entry
             end
             entry.uptime = entry.uptime + (data.uptime or 0)
+            entry.mp5 = entry.mp5 or data.mp5
         end
         if fight.zone and fight.zone ~= "" and not zones[fight.zone] then
             zones[fight.zone] = true
@@ -451,8 +452,13 @@ local function BuildSections(fight)
         local buffs = {}
         for name, data in pairs(fight.buffs) do
             local fraction = fight.duration > 0 and math.min(1, data.uptime / fight.duration) or 0
+            -- Buffs with a known mana per 5 sec show what they were worth over their uptime (an estimate:
+            -- regen past max mana or during a regen-blocking effect isn't subtracted).
+            local worth = data.mp5 and string.format("%s mp5  ·  ~%s mana", ns.FormatNumber(data.mp5),
+                ns.FormatNumber(data.mp5 / 5 * data.uptime))
             table.insert(buffs, {
                 name = name,
+                rank = worth,
                 spellID = data.spellID,
                 icon = data.icon,
                 casts = ns.FormatDuration(data.uptime),

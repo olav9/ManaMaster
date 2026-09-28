@@ -133,11 +133,34 @@ local function GetManaCost(spellID)
     return cost
 end
 
+-- Mana per 5 seconds a buff gives, parsed from its English spell description, or nil. Recognises
+-- "15 mana per 5 sec", "15 mana every 5 sec" and "restores 30 mana every 10 sec". This lets set bonuses,
+-- trinket procs and consumables count as regen buffs without being listed in REGEN_BUFFS.
+-- Cached per spell ID; an empty or unreadable description isn't cached, so a later scan can retry.
+local regenMP5Cache = {}
+
+local function RegenMP5(spellID)
+    local cached = regenMP5Cache[spellID]
+    if cached ~= nil then return cached or nil end
+    local description = C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(spellID)
+    if not IsReadable(description) or description == "" then return nil end
+
+    description = description:lower()
+    local mp5 = tonumber(description:match("(%d+) mana per 5 sec") or description:match("(%d+) mana every 5 sec"))
+    if not mp5 then
+        local amount, seconds = description:match("restores (%d+) mana every (%d+) sec")
+        if amount then mp5 = tonumber(amount) * 5 / tonumber(seconds) end
+    end
+    regenMP5Cache[spellID] = mp5 or false
+    return mp5
+end
+
 -- Returns the player's auras (filter "HELPFUL" or "HARMFUL") whose names are in `names`, as
--- name -> { spellID, icon }, plus how many auras couldn't be read. In combat on WoW Forever,
--- GetAuraDataByIndex throws on auras the game marks secret (e.g. Blood Fury) instead of returning them,
--- so each slot is read in a pcall and skipped on error.
-local function ScanAuras(filter, names)
+-- name -> { spellID, icon, mp5 }, plus how many auras couldn't be read. With `detect` (a function of the
+-- aura's spell ID and aura data, e.g. RegenMP5), auras it returns a value for also count; a number is
+-- stored as mp5. In combat on WoW Forever, GetAuraDataByIndex throws on auras the game marks secret (e.g. Blood Fury)
+-- instead of returning them, so each slot is read in a pcall and skipped on error.
+local function ScanAuras(filter, names, detect)
     local found, hidden = {}, 0
     for i = 1, MAX_AURA_SCAN do
         local ok, aura = pcall(C_UnitAuras.GetAuraDataByIndex, "player", i, filter)
@@ -147,12 +170,15 @@ local function ScanAuras(filter, names)
             break -- past the last buff
         else
             local name = aura.name
+            local spellID = IsReadable(aura.spellId) and aura.spellId or nil
+            local detected = detect and spellID and detect(spellID, aura)
             if not IsReadable(name) then
                 hidden = hidden + 1
-            elseif names[name] then
+            elseif names[name] or detected then
                 found[name] = {
-                    spellID = IsReadable(aura.spellId) and aura.spellId or nil,
+                    spellID = spellID,
                     icon = IsReadable(aura.icon) and aura.icon or nil,
+                    mp5 = type(detected) == "number" and detected or nil,
                 }
             end
         end
@@ -474,13 +500,15 @@ end
 local function UpdateAuras(fight, now)
     ns.Mana.OnAuras(fight, now)
 
-    local active = ScanAuras("HELPFUL", REGEN_BUFFS)
+    -- Listed regen buffs, plus any buff whose description gives mana per 5 sec (e.g. set bonuses).
+    local active = ScanAuras("HELPFUL", REGEN_BUFFS, RegenMP5)
     for name, info in pairs(active) do
         local entry = fight.buffs[name]
         if not entry then
             entry = { uptime = 0, spellID = info.spellID, icon = info.icon }
             fight.buffs[name] = entry
         end
+        entry.mp5 = entry.mp5 or info.mp5
         entry.since = entry.since or now
     end
     for name, entry in pairs(fight.buffs) do
@@ -547,7 +575,7 @@ local function StartFight(encounterName)
 
     UpdateAuras(fight, now)
     if ns.debugMode then
-        local found, hidden = ScanAuras("HELPFUL", REGEN_BUFFS)
+        local found, hidden = ScanAuras("HELPFUL", REGEN_BUFFS, RegenMP5)
         local names = {}
         for name in pairs(found) do table.insert(names, name) end
         Debug("regen buffs", #names > 0 and table.concat(names, ", ") or "none", "| unreadable buffs", hidden)
