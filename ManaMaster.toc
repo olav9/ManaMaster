@@ -1,0 +1,10 @@
+## Interface: 16001
+## Title: ManaMaster
+## Notes: Mana tracking and management
+## Author: olsen
+## Version: 0.1.0
+## SavedVariables: ManaMasterDB
+
+ManaMaster.lua
+HistoryPanel.lua
+MinimapButton.lua
