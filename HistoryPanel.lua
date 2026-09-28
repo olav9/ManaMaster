@@ -27,6 +27,8 @@ local WASTED_ICON = "Interface\\Icons\\Spell_Magic_ManaGain"
 local DRAIN_R, DRAIN_G, DRAIN_B = 0.9, 0.3, 0.3 -- red for mana burned or drained by enemies
 local DRAIN_HEX = "e64d4d"
 local SPEND_HEX = "40a8f5" -- matches ACCENT
+local SAVED_R, SAVED_G, SAVED_B = 0.7, 0.45, 0.95 -- purple for mana saved by cost-reducing procs
+local SAVED_HEX = "b373f2"
 local BUFF_R, BUFF_G, BUFF_B = 0.95, 0.8, 0.3 -- gold for buff uptime, on its own 0-100% scale
 local BUFF_HEX = "f2cc4d"
 local SECTION_HEADER_HEIGHT = 18
@@ -36,7 +38,7 @@ local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete butt
 
 local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
 local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
-local rows, entryRows, sectionHeaders = {}, {}, {}
+local rows, entryRows, sectionHeaders, noteStrings = {}, {}, {}, {}
 -- Selected fights, as a set of fight tables (so the selection survives new fights being added).
 -- Click selects one; Ctrl+click toggles one; Shift+click selects the range from selectionAnchor.
 local selected = {}
@@ -134,11 +136,11 @@ local function CombineFights(fights)
         lastDate = fights[#fights].date,
         duration = 0,
         spent = 0,
-        spells = {}, gains = {}, drains = {}, buffs = {},
+        spells = {}, gains = {}, drains = {}, buffs = {}, saved = {},
         maxMana = 100, -- lowestMana below is a percentage, so the panel's lowest % works unchanged
     }
     local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
-        gainsMeasured = true, buffs = true, lowestMana = true }
+        gainsMeasured = true, buffs = true, lowestMana = true, saved = true }
     local zones, zoneList = {}, {}
 
     for _, fight in ipairs(fights) do
@@ -157,6 +159,20 @@ local function CombineFights(fights)
         MergeEntries(combined.spells, fight.spells)
         MergeEntries(combined.gains, fight.gains)
         MergeEntries(combined.drains, fight.drains)
+        -- Mana saved is grouped by buff, with the spells that used it inside; merge both levels.
+        for key, source in pairs(fight.saved or {}) do
+            if source.spells then
+                local target = combined.saved[key]
+                if not target then
+                    target = { name = source.name, spellID = source.spellID, icon = source.icon,
+                        talent = source.talent, casts = 0, mana = 0, spells = {} }
+                    combined.saved[key] = target
+                end
+                target.casts = target.casts + source.casts
+                target.mana = target.mana + source.mana
+                MergeEntries(target.spells, source.spells)
+            end
+        end
         for name, data in pairs(fight.buffs or {}) do
             local entry = combined.buffs[name]
             if not entry then
@@ -257,6 +273,31 @@ local function GetSectionHeader(i)
     return header
 end
 
+-- Wrapped grey text under a section's rows, e.g. the Mana saved advice.
+local function GetNoteString(i)
+    if noteStrings[i] then return noteStrings[i] end
+    local note = detail.sections:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+    note:SetJustifyH("LEFT")
+    note:SetWordWrap(true)
+    noteStrings[i] = note
+    return note
+end
+
+-- Shifts a detail row's bar, icon and name right by indent (child rows, e.g. spells under a buff in
+-- Mana saved). Rows are pooled, so every row is re-anchored each time it's shown.
+local function SetRowIndent(row, indent)
+    if row.indent == indent then return end
+    row.indent = indent
+    row.bar:ClearAllPoints()
+    row.bar:SetPoint("TOPLEFT", indent, 0)
+    row.bar:SetPoint("BOTTOMLEFT", indent, 0)
+    row.icon:ClearAllPoints()
+    row.icon:SetPoint("LEFT", 4 + indent, 0)
+    row.name:ClearAllPoints()
+    row.name:SetPoint("LEFT", SPELL_NAME_LEFT + indent, 0)
+    row.name:SetPoint("RIGHT", row.casts, "LEFT", -4, 0)
+end
+
 local function GetEntryRow(i)
     if entryRows[i] then return entryRows[i] end
 
@@ -293,7 +334,66 @@ local function GetEntryRow(i)
     return row
 end
 
--- The sections for a fight, top to bottom: spent, gained, regen buff uptime, drained.
+-- Rows for the Mana saved section, plus an optional advice note. fight.saved is grouped by the buff that
+-- reduced the cost (see RecordSaving in ManaMaster.lua): each buff gets a row with its own icon and the
+-- talent behind it (e.g. "Clearcasting  Elemental Focus"), followed by indented rows for the spells that
+-- used it and what each saved per cast. Spell rows are a breakdown, so they don't add to the section total.
+-- The note compares spells under the same buff, since a proc like Clearcasting is worth most on the most
+-- expensive eligible spell.
+local ADVICE_RATIO = 0.5 -- advise when a spell saved less than half per cast of the best spell for that buff
+local CHILD_INDENT = 18
+
+local function SpellLabel(spell)
+    return spell.name .. (spell.rank and (" (" .. spell.rank .. ")") or "")
+end
+
+local function BuildSavedEntries(saved)
+    local sources = {}
+    for _, source in pairs(saved) do
+        -- Skip entries in the shape used by earlier development builds (keyed by spell, no spells table).
+        if source.spells then table.insert(sources, source) end
+    end
+    table.sort(sources, function(a, b) return a.mana > b.mana end)
+
+    local entries, notes = {}, {}
+    for _, source in ipairs(sources) do
+        table.insert(entries, {
+            name = source.name,
+            rank = source.talent,
+            icon = source.icon or (source.spellID and C_Spell.GetSpellTexture(source.spellID)),
+            spellID = source.spellID,
+            casts = source.casts,
+            mana = source.mana,
+        })
+
+        local spells = {}
+        for _, spell in pairs(source.spells) do table.insert(spells, spell) end
+        table.sort(spells, function(a, b) return a.mana > b.mana end)
+        local best, worst
+        for _, spell in ipairs(spells) do
+            local perCast = spell.casts > 0 and spell.mana / spell.casts or 0
+            table.insert(entries, {
+                name = spell.name,
+                rank = string.format("%s~%d per cast", spell.rank and (spell.rank .. "  ·  ") or "", perCast + 0.5),
+                spellID = spell.spellID,
+                casts = spell.casts,
+                mana = spell.mana,
+                child = true,
+            })
+            if not best or perCast > best.perCast then best = { name = SpellLabel(spell), perCast = perCast } end
+            if not worst or perCast < worst.perCast then worst = { name = SpellLabel(spell), perCast = perCast } end
+        end
+
+        if source.name ~= "Other reduction" and best and worst.name ~= best.name
+            and worst.perCast < best.perCast * ADVICE_RATIO then
+            table.insert(notes, string.format("Tip: %s saved ~%d per cast on %s but only ~%d on %s. Save it for %s.",
+                source.name, best.perCast + 0.5, best.name, worst.perCast + 0.5, worst.name, best.name))
+        end
+    end
+    return entries, #notes > 0 and table.concat(notes, "\n") or nil
+end
+
+-- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained.
 local function BuildSections(fight)
     -- Mana gained comes in three flavours:
     --  * gainsMeasured (TBC, combat log): each energize source is exact; passive regen is what the measured
@@ -365,6 +465,13 @@ local function BuildSections(fight)
             countLabel = "Time", valueLabel = "Uptime", isUptime = true, entries = buffs })
     end
 
+    -- Fights saved before mana-saved tracking have no saved table; skip the section for those.
+    if fight.saved then
+        local savedEntries, note = BuildSavedEntries(fight.saved)
+        table.insert(sections, { title = "Mana saved", hex = SAVED_HEX, r = SAVED_R, g = SAVED_G, b = SAVED_B,
+            sign = "", countLabel = "Casts", valueLabel = "Mana", entries = savedEntries, note = note })
+    end
+
     table.insert(sections, { title = "Mana drained", hex = DRAIN_HEX, r = DRAIN_R, g = DRAIN_G, b = DRAIN_B,
         sign = "-", countLabel = "Count", valueLabel = "Mana", entries = ns.SortedEntries(fight.drains) })
 
@@ -424,7 +531,7 @@ local function ShowSections(fight)
         end
     end
 
-    local y, rowIndex = 0, 0
+    local y, rowIndex, noteIndex = 0, 0, 0
     for s, section in ipairs(sections) do
         if s > 1 then y = y + SECTION_GAP end
 
@@ -437,7 +544,8 @@ local function ShowSections(fight)
             header.title:SetText("|cff" .. section.hex .. section.title .. "|r")
         else
             for _, entry in ipairs(section.entries) do
-                if not entry.excluded then total = total + entry.mana end
+                -- Wasted (excluded) rows were never gained; child rows break down their parent row.
+                if not entry.excluded and not entry.child then total = total + entry.mana end
             end
             header.title:SetText(string.format("|cff%s%s|r  |cffffffff%s%s|r",
                 section.hex, section.title, total > 0 and section.sign or "", FormatNumber(total)))
@@ -450,7 +558,7 @@ local function ShowSections(fight)
         local entries = section.entries
         local counted = 0
         for _, entry in ipairs(entries) do
-            if not entry.excluded then counted = counted + 1 end
+            if not entry.excluded and not entry.child then counted = counted + 1 end
         end
         for _, entry in ipairs(entries) do
             rowIndex = rowIndex + 1
@@ -459,6 +567,8 @@ local function ShowSections(fight)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
             row:SetWidth(detailWidth)
+            local indent = entry.child and CHILD_INDENT or 0
+            SetRowIndent(row, indent)
             row.name:SetText(entry.name .. (entry.rank and ("  |cff999999" .. entry.rank .. "|r") or ""))
             -- Fights saved before spell IDs were stored only have the name, which finds the icon for known spells.
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
@@ -472,6 +582,9 @@ local function ShowSections(fight)
             elseif entry.excluded then
                 row.mana:SetText("|cff" .. WASTED_HEX .. "~" .. FormatNumber(entry.mana) .. "|r")
                 fraction = entry.mana / top
+            elseif entry.child then
+                row.mana:SetText(section.sign .. FormatNumber(entry.mana))
+                fraction = entry.mana / top
             else
                 -- Share of the section total, only when there's more than one counted entry to compare.
                 local share = counted > 1 and string.format(" (%d%%)", entry.mana / total * 100) or ""
@@ -481,9 +594,10 @@ local function ShowSections(fight)
             if entry.excluded then
                 row.bar:SetColorTexture(WASTED_R, WASTED_G, WASTED_B, 0.3)
             else
-                row.bar:SetColorTexture(section.r, section.g, section.b, 0.3)
+                -- Child rows get a fainter bar, so the parent row reads as the total.
+                row.bar:SetColorTexture(section.r, section.g, section.b, entry.child and 0.18 or 0.3)
             end
-            SetBarWidth(row, math.max(1, detailWidth * fraction), wasVisible)
+            SetBarWidth(row, math.max(1, (detailWidth - indent) * fraction), wasVisible)
             row.bar:Show()
             row:Show()
             y = y + SPELL_ROW_HEIGHT
@@ -495,6 +609,7 @@ local function ShowSections(fight)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
             row:SetWidth(detailWidth)
+            SetRowIndent(row, 0)
             row.name:SetText("|cff888888None recorded|r")
             row.icon:Hide()
             row.casts:SetText("")
@@ -503,10 +618,23 @@ local function ShowSections(fight)
             row:Show()
             y = y + SPELL_ROW_HEIGHT
         end
+
+        -- Optional wrapped note under the rows (e.g. advice in the Mana saved section).
+        if section.note then
+            noteIndex = noteIndex + 1
+            local note = GetNoteString(noteIndex)
+            note:ClearAllPoints()
+            note:SetPoint("TOPLEFT", 4, -(y + 4))
+            note:SetWidth(detailWidth - 8)
+            note:SetText(section.note)
+            note:Show()
+            y = y + note:GetStringHeight() + 8
+        end
     end
 
     for i = #sections + 1, #sectionHeaders do sectionHeaders[i]:Hide() end
     for i = rowIndex + 1, #entryRows do entryRows[i]:Hide() end
+    for i = noteIndex + 1, #noteStrings do noteStrings[i]:Hide() end
     return y
 end
 
@@ -553,8 +681,15 @@ local function ShowDetail(fight)
 
     -- Starting mana drives the wasted-regen estimate, so show where it came from.
     if fight.startMana and fight.wastedFull then
-        local startText = fight.startManaAssumed and "assumed full (not confirmed since login)"
-            or string.format("~%d%% (estimated)", fight.startMana / fight.maxMana * 100 + 0.5)
+        local pct = fight.startMana / fight.maxMana * 100 + 0.5
+        local startText
+        if fight.startManaAssumed then
+            startText = "assumed full (not confirmed since login)"
+        elseif fight.gainsMeasured then
+            startText = string.format("%d%%", pct) -- TBC: read directly
+        else
+            startText = string.format("~%d%% (estimated)", pct)
+        end
         detail.stats:SetText(detail.stats:GetText() .. "\n|cff888888Start mana " .. startText .. "|r")
     end
 

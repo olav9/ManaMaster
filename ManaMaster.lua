@@ -164,6 +164,145 @@ ns.IsReadable = IsReadable
 ns.Debug = Debug
 ns.Describe = Describe
 ns.GetMana = GetMana
+-- Mana saved: buffs that temporarily reduce spell costs, in the order a saving is credited to them when
+-- several are up. Permanent talent reductions (e.g. Convection) are part of the normal cost, not savings.
+local COST_REDUCERS = { "Clearcasting", "Elemental Mastery", "Inner Focus", "Surge of Light", "Power Infusion" }
+local COST_REDUCER_SET = {}
+for _, name in ipairs(COST_REDUCERS) do COST_REDUCER_SET[name] = true end
+local SNAPSHOT_MAX_AGE = 30 -- seconds; a cast-start snapshot older than this is stale
+
+-- Snapshots taken at UNIT_SPELLCAST_SENT, keyed by cast GUID (or spell ID if the GUID isn't readable).
+-- Mana is paid when a cast finishes, and a proc landing mid-cast can still discount it, so the price is
+-- worked out at UNIT_SPELLCAST_SUCCEEDED from these plus the state then.
+local castSnapshots = {}
+-- Running total of logged mana gains (TBC combat log, via ns.NoteEnergize), so gains during a cast don't
+-- make the cast's mana drop look smaller than its price.
+local energizeTotal = 0
+
+function ns.NoteEnergize(amount)
+    energizeTotal = energizeTotal + amount
+end
+
+-- The first reducer buff found (in COST_REDUCERS order): its name and { spellID, icon } from ScanAuras.
+local function FirstReducer(found)
+    for _, name in ipairs(COST_REDUCERS) do
+        if found[name] then return name, found[name] end
+    end
+end
+
+-- Several classes' procs share the buff name "Clearcasting"; the buff's spell ID tells them apart.
+-- These IDs are the classic-era ones and not yet confirmed on these clients; an unknown ID just shows
+-- the buff name without the talent.
+local REDUCER_TALENTS = {
+    [16246] = "Elemental Focus", -- shaman
+    [12536] = "Arcane Concentration", -- mage
+    [16870] = "Omen of Clarity", -- druid
+}
+
+local function OnCastSent(castGUID, spellID)
+    local now = GetTime()
+    for key, snap in pairs(castSnapshots) do
+        if now - snap.time > SNAPSHOT_MAX_AGE then castSnapshots[key] = nil end
+    end
+    local snap = {
+        time = now,
+        cost = GetManaCost(spellID),
+        mana = GetMana(), -- readable on TBC, nil on WoW Forever
+        energize = energizeTotal,
+        reducers = ScanAuras("HELPFUL", COST_REDUCER_SET),
+    }
+    castSnapshots[IsReadable(castGUID) and castGUID or spellID] = snap
+    Debug("cast start", C_Spell.GetSpellName(spellID) or spellID, "cost", snap.cost,
+        "| reducer:", FirstReducer(snap.reducers) or "none", "| mana", Describe(snap.mana))
+end
+
+-- The mana a finished cast actually cost, and the reducer buffs up when it finished.
+-- The real price is always one of the listed costs: the one at cast start, or the discounted one after
+-- it if a proc landed mid-cast (or 0). On TBC the mana drop since cast start, plus logged gains in between,
+-- picks the nearest of those. The drop itself isn't used as the price, since regen during a cast makes it
+-- smaller (a 150-mana Lightning Bolt measured 129). WoW Forever: the listed cost at cast start.
+local function PaidCost(castGUID, spellID)
+    local key = IsReadable(castGUID) and castGUID or spellID
+    local snap = castSnapshots[key]
+    castSnapshots[key] = nil
+    local costAfter = GetManaCost(spellID)
+    local reducersAfter = ScanAuras("HELPFUL", COST_REDUCER_SET)
+    if not snap then return costAfter, nil, reducersAfter end
+
+    local paid = snap.cost
+    local manaNow = GetMana()
+    if snap.mana and manaNow then
+        local drop = snap.mana - manaNow + (energizeTotal - snap.energize)
+        for _, candidate in ipairs({ costAfter, 0 }) do
+            if math.abs(drop - candidate) < math.abs(drop - paid) then
+                paid = candidate
+            end
+        end
+    end
+    return paid, snap, reducersAfter
+end
+
+-- Learns a spell's normal cost from casts with no reducer buff up at start or finish, and returns it.
+-- Stored per spell ID (so per rank) across sessions in ManaMasterDB.normalCosts.
+local function NormalCost(spellID, snap, reducersAfter)
+    local costs = ns.db.normalCosts
+    if snap and snap.cost > 0 and not next(snap.reducers) and not next(reducersAfter) then
+        costs[spellID] = math.max(costs[spellID] or 0, snap.cost)
+    end
+    return costs[spellID]
+end
+
+-- Records mana saved on a cast during a fight: normal cost minus what was paid, credited to the reducer
+-- buff that was up. Without a reducer buff, small differences are ignored as regen noise.
+-- fight.saved is keyed by reducer buff ("Clearcasting#16246", "Inner Focus#14751", "Other reduction"):
+--   { name, spellID, icon, talent, casts, mana, spells = { [spellID] = { name, rank, casts, mana, normalCost } } }
+local function RecordSaving(fight, spellID, paid, snap, reducersAfter)
+    local normal = NormalCost(spellID, snap, reducersAfter)
+    if not fight or not normal or paid >= normal then return end
+    local saved = normal - paid
+    local sourceName, info = FirstReducer(snap and snap.reducers or {})
+    if not sourceName then
+        sourceName, info = FirstReducer(reducersAfter)
+    end
+    if not sourceName then
+        if saved < math.max(5, normal * 0.1) then return end
+        sourceName, info = "Other reduction", {}
+    end
+
+    local key = sourceName .. (info.spellID and ("#" .. info.spellID) or "")
+    local source = fight.saved[key]
+    if not source then
+        source = {
+            name = sourceName,
+            spellID = info.spellID,
+            icon = info.icon,
+            talent = info.spellID and REDUCER_TALENTS[info.spellID],
+            casts = 0,
+            mana = 0,
+            spells = {},
+        }
+        fight.saved[key] = source
+    end
+    source.casts = source.casts + 1
+    source.mana = source.mana + saved
+
+    local entry = source.spells[spellID]
+    if not entry then
+        entry = {
+            casts = 0,
+            mana = 0,
+            spellID = spellID,
+            name = C_Spell.GetSpellName(spellID) or tostring(spellID),
+            rank = GetSpellRank(spellID),
+        }
+        source.spells[spellID] = entry
+    end
+    entry.casts = entry.casts + 1
+    entry.mana = entry.mana + saved
+    entry.normalCost = normal
+    Debug("mana saved", entry.name, saved, "via", sourceName, info.spellID or "", "| normal", normal, "paid", paid)
+end
+
 ns.ScanAuras = ScanAuras
 ns.RestoredTotal = RestoredTotal
 ns.FormatNumber = FormatNumber
@@ -291,6 +430,13 @@ local function PrintSummary(fight)
         end
     end
 
+    -- Fights saved before mana-saved tracking have no saved table.
+    local savedTotal = 0
+    for _, entry in pairs(fight.saved or {}) do savedTotal = savedTotal + entry.mana end
+    if savedTotal >= 1 then
+        print(string.format("  Mana saved by procs %s", FormatNumber(savedTotal)))
+    end
+
     local spells = SortedEntries(fight.spells)
     for i = 1, math.min(3, #spells) do
         local s = spells[i]
@@ -380,6 +526,7 @@ local function StartFight(encounterName)
         castSpent = 0, -- sum of listed spell costs, used when mana is hidden
         manaHidden = mana == nil,
         spells = {},
+        saved = {}, -- mana saved by cost reducers, keyed by spell ID: { casts, mana, normalCost, sources }
         buffs = {}, -- regen buff name -> { uptime, spellID, icon, since }
     }
     -- The client file sets its mana fields before the fight becomes current, so anything it settles up to
@@ -496,14 +643,19 @@ local function OnTargetChanged()
     end
 end
 
-local function OnSpellCast(spellID)
+local function OnSpellCast(spellID, castGUID)
     if not IsReadable(spellID) then return end
     local now = GetTime()
 
     -- The client file may handle the cast itself (e.g. estimating a potion on WoW Forever).
     if ns.Mana.OnSpellCast(spellID, now) then return end
 
-    local cost = GetManaCost(spellID)
+    -- What the cast actually cost; the cost listed after the cast already reflects procs from it.
+    local cost, snap, reducersAfter = PaidCost(castGUID, spellID)
+    Debug("cast done ", C_Spell.GetSpellName(spellID) or spellID, "(spell " .. spellID .. ") paid", cost,
+        "| reducer:", FirstReducer(reducersAfter) or "none")
+    -- Record savings before the zero-cost check, so free casts (e.g. Elemental Mastery) still count.
+    RecordSaving(ns.current, spellID, cost, snap, reducersAfter)
     if cost <= 0 then return end
     ns.Mana.OnManaSpend(cost, now)
 
@@ -526,6 +678,7 @@ local function OnAddonLoaded()
         end
     end
     ManaMasterDB.fights = ManaMasterDB.fights or {}
+    ManaMasterDB.normalCosts = ManaMasterDB.normalCosts or {} -- learned per spell ID, for mana saved
     ns.db = ManaMasterDB
     ns.CreateMinimapButton()
     ns.Mana.Init()
@@ -564,10 +717,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
             UpdateManaBar()
             OnManaChanged()
         end
+    elseif event == "UNIT_SPELLCAST_SENT" then
+        local _, _, castGUID, spellID = ...
+        if IsReadable(spellID) then
+            OnCastSent(castGUID, spellID)
+        end
     elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-        local _, _, spellID = ...
-        Debug(event, "spell", Describe(spellID))
-        OnSpellCast(spellID)
+        local _, castGUID, spellID = ...
+        OnSpellCast(spellID, castGUID)
     elseif event == "UNIT_MAXPOWER" then
         UpdateManaBar()
     elseif event == "UNIT_AURA" then
@@ -587,6 +744,7 @@ frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
 frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+frame:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
 frame:RegisterUnitEvent("UNIT_AURA", "player")
 frame:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 

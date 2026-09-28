@@ -22,7 +22,32 @@ One codebase serves several clients. Each client gets its own TOC, which loads t
     - `SPELL_DRAIN`/`LEECH` (and their periodic versions) go into `fight.drains`, with the caster name as `rank`.
   - It sets `fight.gainsMeasured = true`. The panel then lists each gain source as measured, shows passive regen as `recovered - logged gains`, and labels `wastedFull` "Overenergized".
   - Drained mana is also included in `fight.spent`, since the core counts every mana drop.
-  - The combat log part isn't tested in game yet.
+  - Combat log tracking is **confirmed working** in game: `energize Water Shield 203` lines appeared, and the fight summary showed "From logged sources 406".
+
+## Mana-saved tracking
+
+**How it works** (shared core, `ManaMaster.lua`):
+- At `UNIT_SPELLCAST_SENT`, `OnCastSent` snapshots the listed cost, the mana (TBC only), the running `energizeTotal` and which `COST_REDUCERS` buffs are up. Snapshots are keyed by cast GUID.
+- At `UNIT_SPELLCAST_SUCCEEDED`, `PaidCost` works out what the cast cost.
+  - On TBC, the paid cost is always one of the listed costs: at cast start, after the cast, or 0. The mana drop since cast start, plus logged gains in between (from `ns.NoteEnergize`, called by `Mana_TBC.lua` for every mana energize), only picks the nearest of those. The raw drop isn't used as the price, because regen during a cast makes it smaller: a 150-mana Lightning Bolt measured 129.
+  - On WoW Forever it's the listed cost at cast start.
+  - The paid cost now also drives per-spell spent. Before, the cost read after the cast already included procs from that cast.
+- `NormalCost` learns each spell ID's cost from casts with no reducer buff up at start or finish. It keeps the highest cost seen, persisted in `ManaMasterDB.normalCosts`.
+- `RecordSaving` credits normal minus paid to the first reducer buff that was up. Without one, only differences of at least 5 mana or 10% count, labelled "Other reduction".
+  - `fight.saved` is grouped by buff, keyed `name#buffSpellID` (e.g. `Clearcasting#16246`): `{ name, spellID, icon, talent, casts, mana, spells = { [spellID] = { name, rank, casts, mana, normalCost } } }`.
+  - `REDUCER_TALENTS` maps the buff spell ID to the talent, telling apart the classes' "Clearcasting" buffs: 16246 Elemental Focus (**confirmed on TBC**), 12536 Arcane Concentration, 16870 Omen of Clarity. The last two are classic-era IDs, not yet confirmed on these clients.
+  - Savings on a spell only start once its normal cost has been learned from a cast without a reducer buff. Until then, discounted casts of it save nothing (seen with Chain Lightning).
+- The panel's **Mana saved** section (purple, between regen buff uptime and drained) has a row per buff, with the buff's icon and its talent, e.g. "Clearcasting  Elemental Focus". The spells that used it are indented rows below (`child = true`), with their saving per cast. Child rows have fainter bars and don't add to the section total. `BuildSavedEntries` adds a tip when one spell under a buff saved less than half per cast of the best spell under the same buff.
+- Not tracked yet: overwritten or expired Clearcasting charges. Charge counts can't identify which spell used a charge, because in-flight crits refresh them at the same moment.
+
+Findings, from TBC with a level 70 elemental shaman:
+- Clearcasting (Elemental Focus) and its charge count (`aura.applications`) are readable on TBC. Forever is untested.
+- `C_Spell.GetSpellPowerCost` reflects Clearcasting while it's up. Lightning Bolt (Rank 12, spell 25449) costs 270 normally and 150 with Clearcasting. That's 40% of the unmodified base of 300, likely after Convection's 10%. So measure savings as the normal cost minus the reduced cost, not as a percentage of the current cost.
+- The cost read at `UNIT_SPELLCAST_SUCCEEDED` is already the **next** cast's cost: a proc gained from this cast's crit is already reflected. So the core's per-cast costs are wrong around procs. They should be read at `UNIT_SPELLCAST_SENT`.
+- Mana is paid, and the discount applied, when the cast **finishes**. A proc landing mid-cast still discounted that cast: Lightning Bolt rank 1 was listed at 14 at cast start and actually cost 8. So the paid price comes from the mana drop on TBC.
+- The discount is 40% of the unmodified base cost. Chain Lightning Rank 6 (spell 25442) has base 760, normal 684 with Convection, and 380 with Clearcasting. Lightning Bolt Rank 1 has base 15, normal 14, and 8 with Clearcasting. Frost Shock Rank 5 (spell 25464) has base 525 and 262 with Clearcasting.
+- Chain Lightning does use Clearcasting charges. In-flight Lightning Bolt crits refreshing charges hide it in the charge count, but the mana drop shows the discounted price.
+- Elemental Mastery's free cast **is** in the listed cost: Lightning Bolt listed 0 at cast start with it up.
 - Keep the TOC files' header lines, apart from `## Interface`, and their shared file list in sync.
 - `HistoryPanel.lua`: fight history window (`/mm`). Loaded after `ManaMaster.lua`. Provides `ns.ToggleHistory`, `ns.RefreshHistory` and `ns.ShowNewestFight`. The panel shows the newest fight when it opens, and switches to each new fight as it ends while open. The fight list supports multi-select: click selects one, Ctrl+click toggles one, and Shift+click selects the range from the last clicked fight. The selection is a set of fight tables (`selected`). With several selected, the details pane shows `CombineFights`: sums, and per-spell/gain/drain entries merged by key. A field such as `recovered` or `regen` is kept only if every selected fight has it. "Delete segment" deletes the whole selection, and asks first if more than one is selected. When the selection changes, detail bars slide to their new widths over 0.25 s with an ease-out (`SetBarWidth`, driven by `animateBars`). Resizing sets widths instantly. It's resizable with a grip in the bottom-right corner; the size is saved in `ManaMasterDB.panelWidth`/`panelHeight`. `UpdateLayout` gives the fight list 40% of the width (240–320 px, so it stops growing at an 800 px panel) and the details pane the rest, and all row and bar widths follow `detailWidth`.
 - `MinimapButton.lua`: draggable minimap button that toggles the history panel. Created from `OnAddonLoaded` once `ManaMasterDB` exists. Position is saved in `ManaMasterDB.minimapAngle`.
@@ -48,7 +73,7 @@ One codebase serves several clients. Each client gets its own TOC, which loads t
   - `KNOWN_MANA_RESTORES` is a fallback for when the description can't be read. It has spell 437, Minor Mana Potion, at 140-180.
   - The average goes into `fight.gains[spellID]` (the same entry shape as spells, with the range as `rank`) and into the simulated pool. Overflow past max counts toward `wastedFull`.
   - `ns.RestoredTotal` sums the gains for the chat summary and the panel's Net.
-- Regen buff uptime is tracked by scanning player buffs on `UNIT_AURA` against `REGEN_BUFFS`, a table of English buff names at the top of `ManaMaster.lua`. It's stored per fight as `fight.buffs[name] = { uptime, spellID, icon }` and shown in the panel right under Mana gained, with its own 0-100% bar scale. Panel section order: spent, gained, regen buff uptime, drained.
+- Regen buff uptime is tracked by scanning player buffs on `UNIT_AURA` against `REGEN_BUFFS`, a table of English buff names at the top of `ManaMaster.lua`. It's stored per fight as `fight.buffs[name] = { uptime, spellID, icon }` and shown in the panel right under Mana gained, with its own 0-100% bar scale. Panel section order: spent, gained, regen buff uptime, saved, drained.
 - In combat, `C_UnitAuras.GetAuraDataByIndex` throws "Auras cannot be accessed when secret" for some buffs (seen with Blood Fury). It doesn't return a secret value for them. Always call it through `pcall` and skip the slot on error.
 - Fights are named after the boss encounter. Otherwise they use the first hostile target, at combat start or via `PLAYER_TARGET_CHANGED`, and fall back to "Combat". Target names are readable on WoW Forever (confirmed in game).
 - WoW Forever has spell ranks, and each rank has its own spell ID and cost. `fight.spells` is keyed by spell ID, and each entry stores `name` and `rank` (from `C_Spell.GetSpellSubtext`). Fights saved before this change are keyed by spell name and have no `name`/`rank` fields; `SortedEntries` handles both.

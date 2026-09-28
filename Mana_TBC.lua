@@ -33,12 +33,18 @@ end
 --   ENERGIZE:     spellId, spellName, spellSchool, amount, overEnergize, powerType, alternatePowerType
 --   DRAIN/LEECH:  spellId, spellName, spellSchool, amount, powerType, extraAmount
 local function OnCombatLogEvent()
-    local fight = ns.current
-    if not fight then return end
     playerGUID = playerGUID or UnitGUID("player")
     local _, subevent, _, _, sourceName, _, _, destGUID, _, _, _, spellID, spellName, _, amount, arg16, arg17 =
         CombatLogGetCurrentEventInfo()
     if destGUID ~= playerGUID then return end
+
+    -- The core uses every mana gain (in or out of a fight) to correct a cast's mana drop for mana saved.
+    if ENERGIZE_EVENTS[subevent] and arg17 == MANA then
+        ns.NoteEnergize(amount)
+    end
+
+    local fight = ns.current
+    if not fight then return end
 
     if ENERGIZE_EVENTS[subevent] then
         local overEnergize, powerType = arg16 or 0, arg17
