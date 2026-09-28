@@ -37,7 +37,10 @@ local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete butt
 local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
 local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
 local rows, entryRows, sectionHeaders = {}, {}, {}
-local selectedFight -- kept as a table reference so it survives new fights being added
+-- Selected fights, as a set of fight tables (so the selection survives new fights being added).
+-- Click selects one; Ctrl+click toggles one; Shift+click selects the range from selectionAnchor.
+local selected = {}
+local selectionAnchor
 
 local function ResultText(fight)
     if fight.success == true then
@@ -48,19 +51,129 @@ local function ResultText(fight)
     return ""
 end
 
-local function DeleteFight(target)
-    local fights = ns.db.fights
-    for i, fight in ipairs(fights) do
-        if fight == target then
-            table.remove(fights, i)
-            if target == selectedFight then
-                -- Select the next row down in the list (the next older fight), or the new last row.
-                selectedFight = fights[i - 1] or fights[i]
-            end
-            break
-        end
+local function IndexOf(fight)
+    for i, f in ipairs(ns.db.fights) do
+        if f == fight then return i end
+    end
+end
+
+-- Selected fights in history order (oldest first).
+local function SelectedFights()
+    local list = {}
+    for _, fight in ipairs(ns.db.fights) do
+        if selected[fight] then table.insert(list, fight) end
+    end
+    return list
+end
+
+local function SelectOnly(fight)
+    wipe(selected)
+    if fight then selected[fight] = true end
+    selectionAnchor = fight
+end
+
+local function OnRowClick(fight)
+    if IsShiftKeyDown() and selectionAnchor and IndexOf(selectionAnchor) then
+        local from, to = IndexOf(selectionAnchor), IndexOf(fight)
+        if from > to then from, to = to, from end
+        wipe(selected)
+        for i = from, to do selected[ns.db.fights[i]] = true end
+        -- The anchor stays put, so further Shift+clicks extend from the same fight.
+    elseif IsControlKeyDown() then
+        selected[fight] = not selected[fight] or nil
+        selectionAnchor = fight
+    else
+        SelectOnly(fight)
     end
     ns.RefreshHistory()
+end
+
+-- Deletes fights from history. If the selection ends up empty, it moves to the next older fight after
+-- the deleted ones (the next row down in the list), or the newest.
+local function DeleteFights(targets)
+    local fights = ns.db.fights
+    local lowest
+    for _, target in ipairs(targets) do
+        local i = IndexOf(target)
+        if i then
+            table.remove(fights, i)
+            selected[target] = nil
+            lowest = math.min(lowest or i, i)
+        end
+    end
+    if not next(selected) and lowest then
+        SelectOnly(fights[lowest - 1] or fights[lowest] or fights[#fights])
+    end
+    ns.RefreshHistory()
+end
+
+-- Adds per-spell entry tables together (fight.spells, gains, drains), keyed the same way.
+local function MergeEntries(target, source)
+    for key, data in pairs(source or {}) do
+        local entry = target[key]
+        if not entry then
+            entry = { casts = 0, mana = 0, spellID = data.spellID, name = data.name or key, rank = data.rank }
+            target[key] = entry
+        end
+        entry.casts = entry.casts + (data.casts or 0)
+        entry.mana = entry.mana + (data.mana or 0)
+    end
+end
+
+-- Builds one fight-shaped table that adds several fights together, for the details pane. A field is only
+-- kept if every fight has it (e.g. recovered), so fights saved by older versions can't skew the totals.
+local function CombineFights(fights)
+    local combined = {
+        isCombined = true,
+        count = #fights,
+        name = #fights .. " fights",
+        date = fights[1].date,
+        lastDate = fights[#fights].date,
+        duration = 0,
+        spent = 0,
+        spells = {}, gains = {}, drains = {}, buffs = {},
+        maxMana = 100, -- lowestMana below is a percentage, so the panel's lowest % works unchanged
+    }
+    local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
+        gainsMeasured = true, buffs = true, lowestMana = true }
+    local zones, zoneList = {}, {}
+
+    for _, fight in ipairs(fights) do
+        combined.duration = combined.duration + (fight.duration or 0)
+        combined.spent = combined.spent + (fight.spent or 0)
+        for field in pairs(all) do
+            if not fight[field] then all[field] = false end
+        end
+        for _, field in ipairs({ "recovered", "regen", "wastedFull", "wastedBlocked" }) do
+            if fight[field] then combined[field] = (combined[field] or 0) + fight[field] end
+        end
+        if fight.lowestMana and fight.maxMana and fight.maxMana > 0 then
+            local pct = fight.lowestMana / fight.maxMana * 100
+            combined.lowestMana = math.min(combined.lowestMana or pct, pct)
+        end
+        MergeEntries(combined.spells, fight.spells)
+        MergeEntries(combined.gains, fight.gains)
+        MergeEntries(combined.drains, fight.drains)
+        for name, data in pairs(fight.buffs or {}) do
+            local entry = combined.buffs[name]
+            if not entry then
+                entry = { uptime = 0, spellID = data.spellID, icon = data.icon }
+                combined.buffs[name] = entry
+            end
+            entry.uptime = entry.uptime + (data.uptime or 0)
+        end
+        if fight.zone and fight.zone ~= "" and not zones[fight.zone] then
+            zones[fight.zone] = true
+            table.insert(zoneList, fight.zone)
+        end
+    end
+
+    for field, everyFight in pairs(all) do
+        if not everyFight then combined[field] = nil end
+    end
+    combined.gainsMeasured = all.gainsMeasured or nil
+    combined.zone = table.concat(zoneList, ", ")
+    return combined
 end
 
 local function GetRow(i)
@@ -93,7 +206,7 @@ local function GetRow(i)
         GameTooltip:Hide()
     end)
     row.delete:SetScript("OnClick", function()
-        DeleteFight(row.fight)
+        DeleteFights({ row.fight })
     end)
 
     row.spent = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -114,8 +227,7 @@ local function GetRow(i)
     row.info:SetWordWrap(false)
 
     row:SetScript("OnClick", function(self)
-        selectedFight = self.fight
-        ns.RefreshHistory()
+        OnRowClick(self.fight)
     end)
 
     rows[i] = row
@@ -367,9 +479,16 @@ local function ShowDetail(fight)
         return
     end
 
-    detail.title:SetText(fight.name .. ResultText(fight))
-    detail.info:SetText(string.format("%s  ·  %s  ·  %s",
-        date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
+    if fight.isCombined then
+        detail.title:SetText(fight.name .. " |cff999999combined|r")
+        detail.info:SetText(string.format("%s – %s  ·  %s total  ·  %s",
+            date("%m/%d %H:%M", fight.date), date("%m/%d %H:%M", fight.lastDate),
+            ns.FormatDuration(fight.duration), fight.zone))
+    else
+        detail.title:SetText(fight.name .. ResultText(fight))
+        detail.info:SetText(string.format("%s  ·  %s  ·  %s",
+            date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
+    end
 
     if fight.recovered then
         local net = fight.recovered - fight.spent
@@ -409,7 +528,7 @@ end
 function ns.ShowNewestFight()
     if not panel or not panel:IsShown() then return end
     local fights = ns.db.fights
-    selectedFight = fights[#fights]
+    SelectOnly(fights[#fights])
     listScroll:SetVerticalScroll(0)
     detailScroll:SetVerticalScroll(0)
     ns.RefreshHistory()
@@ -419,17 +538,17 @@ function ns.RefreshHistory()
     if not panel or not panel:IsShown() then return end
     local fights = ns.db.fights
 
-    -- Fall back to the newest fight if the selected one was pruned or history was reset.
-    local found = false
-    for _, fight in ipairs(fights) do
-        if fight == selectedFight then
-            found = true
-            break
-        end
+    -- Drop selected fights that were pruned or deleted; fall back to the newest if nothing is left.
+    local present = {}
+    for _, fight in ipairs(fights) do present[fight] = true end
+    for fight in pairs(selected) do
+        if not present[fight] then selected[fight] = nil end
     end
-    if not found then
-        selectedFight = fights[#fights]
+    if selectionAnchor and not present[selectionAnchor] then selectionAnchor = nil end
+    if not next(selected) then
+        SelectOnly(fights[#fights])
     end
+    local selectedList = SelectedFights()
 
     local count = #fights
     for i = 1, count do
@@ -440,7 +559,7 @@ function ns.RefreshHistory()
         row.spent:SetText(ns.FormatNumber(fight.spent))
         row.info:SetText(string.format("%s  ·  %s  ·  %s",
             date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
-        row.selected:SetShown(fight == selectedFight)
+        row.selected:SetShown(selected[fight] == true)
         row:Show()
     end
     for i = count + 1, #rows do
@@ -449,9 +568,35 @@ function ns.RefreshHistory()
     listContent:SetHeight(math.max(1, count * (ROW_HEIGHT + ROW_GAP)))
 
     clearButton:SetEnabled(count > 0)
-    deleteButton:SetEnabled(selectedFight ~= nil)
-    ShowDetail(selectedFight)
+    deleteButton:SetEnabled(#selectedList > 0)
+    deleteButton:SetText(#selectedList > 1 and ("Delete " .. #selectedList .. " segments") or "Delete segment")
+    if #selectedList > 1 then
+        ShowDetail(CombineFights(selectedList))
+    else
+        ShowDetail(selectedList[1])
+    end
 end
+
+-- Deletes the selected fights; asks first when there's more than one.
+local function DeleteSelected()
+    local list = SelectedFights()
+    if #list > 1 then
+        StaticPopup_Show("MANAMASTER_DELETE_SELECTED", #list)
+    else
+        DeleteFights(list)
+    end
+end
+
+StaticPopupDialogs["MANAMASTER_DELETE_SELECTED"] = {
+    text = "Delete the %d selected fights? This can't be undone.",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function() DeleteFights(SelectedFights()) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
 
 StaticPopupDialogs["MANAMASTER_CLEAR_HISTORY"] = {
     text = "Delete all %d saved fights? This can't be undone.",
@@ -549,12 +694,10 @@ local function CreatePanel()
     end)
 
     deleteButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
-    deleteButton:SetSize(120, 22)
+    deleteButton:SetSize(150, 22) -- room for "Delete 12 segments"
     deleteButton:SetPoint("BOTTOMRIGHT", -28, 12) -- leaves the corner for the resize grip
     deleteButton:SetText("Delete segment")
-    deleteButton:SetScript("OnClick", function()
-        DeleteFight(selectedFight)
-    end)
+    deleteButton:SetScript("OnClick", DeleteSelected)
 
     -- Resize grip in the bottom-right corner, like the chat windows'.
     local grip = CreateFrame("Button", nil, panel)
