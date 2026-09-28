@@ -41,6 +41,7 @@ local rows, entryRows, sectionHeaders = {}, {}, {}
 -- Click selects one; Ctrl+click toggles one; Shift+click selects the range from selectionAnchor.
 local selected = {}
 local selectionAnchor
+local animateBars = false -- when true, the next refresh animates detail bars (set by selection changes)
 
 local function ResultText(fight)
     if fight.success == true then
@@ -85,6 +86,7 @@ local function OnRowClick(fight)
     else
         SelectOnly(fight)
     end
+    animateBars = true
     ns.RefreshHistory()
 end
 
@@ -104,6 +106,7 @@ local function DeleteFights(targets)
     if not next(selected) and lowest then
         SelectOnly(fights[lowest - 1] or fights[lowest] or fights[#fights])
     end
+    animateBars = true
     ns.RefreshHistory()
 end
 
@@ -366,6 +369,43 @@ local function BuildSections(fight)
     return sections
 end
 
+-- Bar animation: when the selection changes, each detail bar slides from its current width to its new one.
+-- Resizing the panel sets widths instantly instead, since it re-lays out every frame while dragging.
+local BAR_ANIM_DURATION = 0.25 -- seconds
+local animatingRows = {}
+local animFrame = CreateFrame("Frame")
+animFrame:Hide()
+animFrame:SetScript("OnUpdate", function()
+    local now = GetTime()
+    for row in pairs(animatingRows) do
+        local t = (now - row.animStart) / BAR_ANIM_DURATION
+        if t >= 1 then
+            row.bar:SetWidth(row.animTo)
+            animatingRows[row] = nil
+        else
+            local eased = 1 - (1 - t) ^ 3 -- ease-out: fast start, gentle stop
+            row.bar:SetWidth(row.animFrom + (row.animTo - row.animFrom) * eased)
+        end
+    end
+    if not next(animatingRows) then animFrame:Hide() end
+end)
+
+-- Sets a row's bar width, animated from its current width if requested. wasVisible: whether the bar
+-- was on screen before this update; bars that weren't grow from zero.
+local function SetBarWidth(row, width, wasVisible)
+    if not animateBars then
+        animatingRows[row] = nil
+        row.bar:SetWidth(width)
+        return
+    end
+    row.animFrom = wasVisible and row.bar:GetWidth() or 1
+    row.animTo = width
+    row.animStart = GetTime()
+    row.bar:SetWidth(row.animFrom)
+    animatingRows[row] = true
+    animFrame:Show()
+end
+
 -- Lays out section headings and rows top to bottom; returns the total height used.
 local function ShowSections(fight)
     local FormatNumber = ns.FormatNumber
@@ -413,6 +453,7 @@ local function ShowSections(fight)
         for _, entry in ipairs(entries) do
             rowIndex = rowIndex + 1
             local row = GetEntryRow(rowIndex)
+            local wasVisible = row:IsShown() and row.bar:IsShown()
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
             row:SetWidth(detailWidth)
@@ -440,7 +481,7 @@ local function ShowSections(fight)
             else
                 row.bar:SetColorTexture(section.r, section.g, section.b, 0.3)
             end
-            row.bar:SetWidth(math.max(1, detailWidth * fraction))
+            SetBarWidth(row, math.max(1, detailWidth * fraction), wasVisible)
             row.bar:Show()
             row:Show()
             y = y + SPELL_ROW_HEIGHT
@@ -529,6 +570,7 @@ function ns.ShowNewestFight()
     if not panel or not panel:IsShown() then return end
     local fights = ns.db.fights
     SelectOnly(fights[#fights])
+    animateBars = true
     listScroll:SetVerticalScroll(0)
     detailScroll:SetVerticalScroll(0)
     ns.RefreshHistory()
@@ -575,6 +617,7 @@ function ns.RefreshHistory()
     else
         ShowDetail(selectedList[1])
     end
+    animateBars = false -- only the refresh right after a selection change animates
 end
 
 -- Deletes the selected fights; asks first when there's more than one.
