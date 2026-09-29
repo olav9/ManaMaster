@@ -434,6 +434,7 @@ local function ScanAuras(filter, names, detect)
             elseif names[name] or detected then
                 found[name] = {
                     spellID = spellID,
+                    auraInstanceID = IsReadable(aura.auraInstanceID) and aura.auraInstanceID or nil,
                     icon = IsReadable(aura.icon) and aura.icon or nil,
                     mp5 = type(detected) == "number" and detected or nil,
                     isDrink = isDrink or nil,
@@ -866,11 +867,24 @@ end
 
 -- Starts or stops uptime timers for each tracked buff to match what the player has now, then lets the
 -- client file react to the change (e.g. regen-blocking debuffs).
+-- Whether a buff a scan didn't find is still up. In combat some aura slots can't be read, so a scan can miss
+-- a buff that's still there (seen with Blessing of Wisdom: 0.4 s uptime in a fight where it never dropped).
+-- So a buff only ends when the game confirms its aura instance is gone; if that can't be read, it's still up.
+local function StillUp(entry, hiddenSlots)
+    local id = entry.auraInstanceID
+    if id and C_UnitAuras.GetAuraDataByAuraInstanceID then
+        local ok, aura = pcall(C_UnitAuras.GetAuraDataByAuraInstanceID, "player", id)
+        if not ok then return true end -- unreadable, not gone
+        return aura ~= nil
+    end
+    return hiddenSlots > 0 -- no instance ID: trust the scan only if it read every slot
+end
+
 local function UpdateAuras(fight, now)
     ns.Mana.OnAuras(fight, now)
 
     -- Listed regen buffs, plus any buff whose description gives mana per 5 sec (e.g. set bonuses).
-    local active = ScanAuras("HELPFUL", REGEN_BUFFS, RegenMP5)
+    local active, hiddenSlots = ScanAuras("HELPFUL", REGEN_BUFFS, RegenMP5)
     for name, info in pairs(active) do
         local entry = fight.buffs[name]
         if not entry then
@@ -879,12 +893,19 @@ local function UpdateAuras(fight, now)
         end
         entry.mp5 = entry.mp5 or info.mp5
         entry.isDrink = entry.isDrink or info.isDrink
+        entry.auraInstanceID = info.auraInstanceID or entry.auraInstanceID
         entry.since = entry.since or now
     end
     for name, entry in pairs(fight.buffs) do
         if entry.since and not active[name] then
-            entry.uptime = entry.uptime + (now - entry.since)
-            entry.since = nil
+            if StillUp(entry, hiddenSlots) then
+                Debug("buff", name, "not found by the scan but still up | unreadable slots", hiddenSlots)
+            else
+                Debug("buff ended", name, "| unreadable slots", hiddenSlots)
+                entry.uptime = entry.uptime + (now - entry.since)
+                entry.since = nil
+                entry.auraInstanceID = nil
+            end
         end
     end
 end
@@ -1039,6 +1060,7 @@ local function EndFight(success)
             entry.uptime = entry.uptime + (now - entry.since)
             entry.since = nil
         end
+        entry.auraInstanceID = nil -- only needed while the fight runs
     end
 
     -- An arena match refills mana as it ends. If the last gain was that refill, it isn't mana recovered during
