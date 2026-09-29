@@ -70,6 +70,86 @@ local function Overlaps(aStart, aEnd, bStart, bEnd)
     return aStart <= bEnd + MATCH_TOLERANCE and aEnd >= bStart - MATCH_TOLERANCE
 end
 
+local DAY = 86400
+local OVERALL_LIST_CAP = 40 -- Details keeps only the latest 40 entries in segments_added
+local lastOverallSummary -- the last "details overall" debug line, so it's only logged on change
+
+-- a - b for two times of day, across midnight: in -12 h .. +12 h.
+local function ClockOffset(a, b)
+    local diff = (a - b) % DAY
+    return diff > DAY / 2 and diff - DAY or diff
+end
+
+-- The ManaMaster fights in Details' Overall segment, oldest first. Details records each fight it adds to
+-- Overall in combat.segments_added ({ name, elapsed, clock = "HH:MM:SS" start }, newest first). Each entry
+-- is matched to the saved fight whose time span overlaps it most. Not by start time alone: Details starts
+-- a fight at the first combat event, which can come seconds after ManaMaster's (combat start), and with
+-- back-to-back pulls that missed a fight (seen in game: 19 listed, 18 matched). Fights from other days can
+-- share the time of day, so only the newest day with an overlapping fight counts.
+-- Details keeps only the latest 40 entries, so with a full list the older fights in Overall are taken by
+-- time instead: every saved fight since Overall's own start (GetDate, set from the first fight added) up to
+-- the oldest matched one, within a day of it. The running fight is included while in combat.
+local function OverallFights(combat)
+    local saved = ns.char and ns.char.fights or {}
+    local result, included = {}, {}
+    local function Add(fight)
+        if not included[fight] then
+            included[fight] = true
+            table.insert(result, fight)
+        end
+    end
+
+    local added = combat.segments_added
+    local oldestMatch
+    for _, segment in ipairs(added) do
+        local clock = ClockSeconds(segment.clock)
+        if clock then
+            local length = tonumber(segment.elapsed) or 0
+            local best, bestOverlap
+            for i = #saved, 1, -1 do -- newest first
+                local fight = saved[i]
+                local start = not included[fight] and FightSpan(fight, "day")
+                -- Stop at an older day once the newest day with a match has been searched.
+                if best and fight.date and best.date and best.date - fight.date > DAY / 2 then break end
+                if start then
+                    -- Both spans relative to the Details entry's start, with the usual slack at both ends.
+                    local from = ClockOffset(start, clock)
+                    local to = from + (fight.duration or 0)
+                    local overlap = math.min(to, length + MATCH_TOLERANCE) - math.max(from, -MATCH_TOLERANCE)
+                    if overlap > 0 and (not bestOverlap or overlap > bestOverlap) then
+                        best, bestOverlap = fight, overlap
+                    end
+                end
+            end
+            if best then
+                Add(best)
+                if not oldestMatch or (best.date or 0) < (oldestMatch.date or 0) then oldestMatch = best end
+            end
+        end
+    end
+
+    if #added >= OVERALL_LIST_CAP and oldestMatch and oldestMatch.date then
+        local firstClock = ClockSeconds((combat:GetDate()))
+        for _, fight in ipairs(saved) do
+            local start = FightSpan(fight, "day")
+            if fight.date and start and fight.date < oldestMatch.date and oldestMatch.date - fight.date < DAY
+                and (not firstClock or start >= firstClock - MATCH_TOLERANCE) then
+                Add(fight)
+            end
+        end
+    end
+
+    if ns.current then Add(ns.current) end
+    table.sort(result, function(a, b) return (a.date or 0) < (b.date or 0) end)
+    -- Logged only when the counts change, since this runs on every refresh.
+    local summary = #added .. " listed by Details, " .. #result .. " matched"
+    if summary ~= lastOverallSummary then
+        lastOverallSummary = summary
+        ns.Debug("details overall:", summary)
+    end
+    return result
+end
+
 -- The ManaMaster fights that overlap the followed window's selected Details segment. Details' "Overall"
 -- segment spans everything since its last reset, so it matches every fight in that time. Falls back to
 -- DefaultFights when the segment has no usable times (e.g. Details built on Blizzard's meter).
@@ -87,11 +167,15 @@ local function FightsForSegment()
     local gameStart, gameEnd = combat:GetStartTime(), combat:GetEndTime()
     if gameStart == 0 then gameStart = nil end
 
-    -- "Overall" (segment -1) keeps growing and may have no end time, so it isn't an overlap: it's every fight
-    -- since Details last reset it, up to now, including the running fight. Without a usable start time,
-    -- every saved fight.
+    -- "Overall" (segment -1) isn't matched by time span: its start time is made up (Details sets it to the
+    -- last fight's start minus the combat time so far, so it skips the idle time between fights), and
+    -- Details only adds fights that pass its Overall filter. So match the fights Details lists as added to
+    -- it (OverallFights). Details versions without that list fall back to every fight since its start time.
     local isOverall = (inst.GetSegment and inst:GetSegment() == -1)
         or (Details.tabela_overall and combat == Details.tabela_overall)
+    if isOverall and type(combat.segments_added) == "table" and #combat.segments_added > 0 then
+        return OverallFights(combat)
+    end
     if isOverall then
         local list = {}
         for _, fight in ipairs(ns.char and ns.char.fights or {}) do table.insert(list, fight) end
