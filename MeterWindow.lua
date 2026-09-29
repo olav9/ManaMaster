@@ -129,19 +129,9 @@ end
 ------------------------------------------------------------------------------------------------------------
 -- Rows
 
+-- Rank and context are in the tooltip (ns.ShowBarTooltip, shared with the Details plugin).
 local function ShowRowTooltip(row)
-    local entry = row.entry
-    if not entry then return end
-    GameTooltip:SetOwner(row, "ANCHOR_RIGHT")
-    if type(entry.spellID) == "number" and pcall(GameTooltip.SetSpellByID, GameTooltip, entry.spellID) then
-        GameTooltip:Show()
-        return
-    end
-    GameTooltip:ClearLines()
-    GameTooltip:AddLine(entry.name or "")
-    if entry.rank then GameTooltip:AddLine(entry.rank, 1, 1, 1, true) end
-    if entry.description then GameTooltip:AddLine(entry.description, 0.8, 0.8, 0.8, true) end
-    GameTooltip:Show()
+    ns.ShowBarTooltip(row, row.entry)
 end
 
 local function GetRow(i)
@@ -277,7 +267,7 @@ local function Update()
             row.entry = entry
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
             row.icon:SetDesaturated(entry.excluded == true)
-            row.leftText:SetText(entry.name .. (entry.rank and ("  |cffaaaaaa" .. entry.rank .. "|r") or ""))
+            row.leftText:SetText(ns.BarLabel(entry)) -- name with a short rank or mp5; details in the tooltip
 
             local value, r, g, b, a
             if section.isUptime then
@@ -287,7 +277,8 @@ local function Update()
                 local share = (counted > 1 and not entry.excluded and not entry.child)
                     and string.format(" (%d%%)", entry.mana / total * 100) or ""
                 local prefix = entry.excluded and "~" or section.sign
-                row.rightText:SetText(prefix .. ns.FormatNumber(entry.mana) .. share)
+                -- Casts, count or seconds before the amount, in grey: "×8  200 (73%)", "16s  6 (15%)".
+                row.rightText:SetText(ns.BarCount(entry) .. prefix .. ns.FormatNumber(entry.mana) .. share)
                 value = top > 0 and entry.mana / top or 0
             end
             if entry.excluded then

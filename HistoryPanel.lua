@@ -442,8 +442,10 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         if data.mp5 and (data.uptime or 0) > 0 and not coveredByTicks[name] then
             local mana = data.mp5 / 5 * data.uptime
             estimated = estimated + mana
+            -- mp5 and seconds are also kept as data, for the compact rows of the meter window.
             table.insert(children, { name = name, icon = data.icon, spellID = data.spellID,
-                rank = "passive " .. ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana })
+                rank = "passive " .. ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana,
+                mp5 = data.mp5, seconds = data.uptime })
         end
     end
 
@@ -486,9 +488,13 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         local function Rate(regen, seconds)
             return seconds > 0 and string.format("%.1f/s", regen / seconds) or "no time"
         end
+        local function MP5(regen, seconds)
+            return seconds > 0 and regen / seconds * 5 or nil
+        end
         -- The row text leads with where the regen comes from; the tooltip explains the window.
         if casting >= 1 then
             table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, mana = casting,
+                mp5 = MP5(split.castingRegen, split.castingTime), seconds = split.castingTime,
                 rank = string.format("mp5 from gear and talents  ·  %s  ·  %s",
                     Rate(split.castingRegen, split.castingTime), FormatDuration(split.castingTime)),
                 description = "Regen within 5 seconds of spending mana (the five-second rule). Spirit regen "
@@ -497,6 +503,7 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         end
         if full >= 1 then
             table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = full,
+                mp5 = MP5(split.fullRegen, split.fullTime), seconds = split.fullTime,
                 rank = string.format("spirit and mp5  ·  %s  ·  %s",
                     Rate(split.fullRegen, split.fullTime), FormatDuration(split.fullTime)),
                 description = "Regen more than 5 seconds after the last mana spend, at the full rate the game "
@@ -741,6 +748,70 @@ local function BuildSections(fight, power)
     return sections
 end
 ns.BuildSections = BuildSections -- also used by the meter window (MeterWindow.lua)
+
+-- Compact text for bar windows (meter window, Details plugin), which have no room for the panel's context
+-- text: the name, plus the mp5 for regen rows. Rank and the rest are in the tooltip.
+local BAR_GREY = "|cff999999"
+
+-- The bar's left text: the name, plus the mp5 for regen rows. Ranks are in the tooltip, not on the bar.
+function ns.BarLabel(entry)
+    if not entry.mp5 then return entry.name end
+    local mp5 = entry.mp5 >= 10 and string.format("%d", entry.mp5 + 0.5)
+        or (string.format("%.1f", entry.mp5):gsub("%.0$", ""))
+    return entry.name .. "  " .. BAR_GREY .. mp5 .. " mp5|r"
+end
+
+-- Whether any line of GameTooltip already reads text (e.g. the spell tooltip's own "Rank 3").
+local function TooltipHasLine(text)
+    for i = 1, GameTooltip:NumLines() do
+        for _, side in ipairs({ "Left", "Right" }) do
+            local line = _G["GameTooltipText" .. side .. i]
+            local ok, lineText = pcall(line and line.GetText or function() end, line)
+            if ok and ns.IsReadable(lineText) and lineText == text then return true end
+        end
+    end
+    return false
+end
+
+-- Tooltip for a bar row (meter window, Details plugin): the spell's own tooltip where there is one, else the
+-- name; then what the compact row leaves out: the rank, context such as "estimated" or a proc's talent, and
+-- the description.
+function ns.ShowBarTooltip(owner, entry)
+    if not entry then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    local isSpell = type(entry.spellID) == "number"
+        and pcall(GameTooltip.SetSpellByID, GameTooltip, entry.spellID)
+    -- A spell rank goes top right in grey, as in the game's own spell tooltips ("Chain Lightning   Rank 6").
+    -- Other rank-field text (e.g. "estimated", a potion's range, a proc's talent) is a body line.
+    local isRank = type(entry.rank) == "string" and entry.rank:match("^Rank %d+$") ~= nil
+    if isSpell then
+        if isRank and not TooltipHasLine(entry.rank) then
+            GameTooltipTextRight1:SetText(entry.rank)
+            GameTooltipTextRight1:SetTextColor(0.5, 0.5, 0.5)
+            GameTooltipTextRight1:Show()
+        end
+    else
+        GameTooltip:ClearLines()
+        if isRank then
+            GameTooltip:AddDoubleLine(entry.name or "", entry.rank, 1, 1, 1, 0.5, 0.5, 0.5)
+        else
+            GameTooltip:AddLine(entry.name or "", 1, 1, 1)
+        end
+    end
+    if entry.rank and not isRank then
+        GameTooltip:AddLine(entry.rank, 1, 1, 1, true)
+    end
+    if entry.description then GameTooltip:AddLine(entry.description, 0.8, 0.8, 0.8, true) end
+    GameTooltip:Show()
+end
+
+-- What goes before a bar's amount: seconds for regen rows ("16s"), the count for casts and gains ("×8"),
+-- or nothing (e.g. wasted rows, uptime rows).
+function ns.BarCount(entry)
+    if entry.seconds then return BAR_GREY .. string.format("%ds", entry.seconds + 0.5) .. "|r  " end
+    if type(entry.casts) == "number" and entry.casts > 0 then return BAR_GREY .. "×" .. entry.casts .. "|r  " end
+    return ""
+end
 
 -- Bar animation: when the selection changes, each detail bar slides from its current width to its new one.
 -- Resizing the panel sets widths instantly instead, since it re-lays out every frame while dragging.

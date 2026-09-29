@@ -196,9 +196,34 @@ local function NewRow(i)
     row.fontsize = 9.9
     row.fontface = "GameFontHighlightSmall"
     row.rowId = i
+    -- Hovering shows the spell's tooltip with its rank, like the meter window. Event-driven, like Details'
+    -- own bars: hooks run as hook(frame, bar), and row.entry is the spell the row shows (set in Update).
+    -- Only mouse motion is enabled; clicks fall through to the window (right-click for Details' menu).
+    row:SetHook("OnEnter", function(bar) ns.ShowBarTooltip(bar, row.entry) end)
+    row:SetHook("OnLeave", function(bar)
+        if GameTooltip:IsOwned(bar) then GameTooltip:Hide() end
+    end)
+    local bar = row.statusbar
+    if bar.SetMouseMotionEnabled then
+        bar:SetMouseMotionEnabled(true)
+        bar:SetMouseClickEnabled(false)
+    end
     row:Hide()
     plugin.Rows[i] = row
     return row
+end
+
+-- Puts the rows above the Details window's right-click catcher (windowSwitchButton, a mouse-enabled button
+-- covering the whole window at its base level + 4), which otherwise takes the hover: seen in game, with our
+-- rows at the same level. Details' own bars sit above it the same way.
+local function RaiseRows(inst)
+    local catcher = inst and inst.windowSwitchButton
+    local strata = catcher and catcher:GetFrameStrata() or frame:GetFrameStrata()
+    local level = (catcher and catcher:GetFrameLevel() or frame:GetFrameLevel()) + 1
+    for _, row in ipairs(plugin.Rows) do
+        row.statusbar:SetFrameStrata(strata)
+        row.statusbar:SetFrameLevel(level)
+    end
 end
 
 -- Matches a row to the window's bar style (font, texture, height) and stacks it.
@@ -226,6 +251,7 @@ local function SizeChanged()
     plugin.canShow = math.floor(height / (inst.row_info.height + 1))
     for i = #plugin.Rows + 1, plugin.canShow do NewRow(i) end
     for _, row in ipairs(plugin.Rows) do LayoutRow(row) end
+    RaiseRows(inst)
 end
 
 -- Bar animation: each row slides from its current value to the new one, like the history panel's bars,
@@ -283,6 +309,8 @@ local function Update()
             row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment"
                 or ("No " .. (POWER_LABELS[power] or "power") .. " spent"))
             row:SetRightText("")
+            if GameTooltip:IsOwned(row.statusbar) then GameTooltip:Hide() end
+            row.entry, row.entryKey = nil, nil
             animatingRows[row] = nil
             row.animValue = 0
             row:SetValue(0)
@@ -290,14 +318,24 @@ local function Update()
             row:Show()
         elseif spell and i <= plugin.canShow then
             local pct = total > 0 and spell.mana / total * 100 or 0
-            row:SetLeftText(spell.name .. (spell.rank and (" (" .. spell.rank .. ")") or ""))
-            row:SetRightText(string.format("%s (%.0f%%)", ns.FormatNumber(spell.mana), pct))
+            -- Same compact text as the meter window: "Frostbolt" and "×8  200 (73%)"; the rank is in the tooltip.
+            row.entry = spell
+            -- Rows reorder as mana is spent: if the hovered row now shows another spell, update its tooltip.
+            local key = spell.spellID or spell.name
+            if row.entryKey ~= key and GameTooltip:IsOwned(row.statusbar) then
+                ns.ShowBarTooltip(row.statusbar, spell)
+            end
+            row.entryKey = key
+            row:SetLeftText(ns.BarLabel(spell))
+            row:SetRightText(string.format("%s%s (%.0f%%)", ns.BarCount(spell), ns.FormatNumber(spell.mana), pct))
             -- A row that showed a different spell before (spells reorder as mana changes) slides from there too.
             SetRowValue(row, top > 0 and spell.mana / top * 100 or 0, row.statusbar:IsShown())
             row:SetIcon(C_Spell.GetSpellTexture(spell.spellID or spell.name) or UNKNOWN_ICON, ICON_COORDS)
             row:SetColor(barR, barG, barB)
             row:Show()
         else
+            if GameTooltip:IsOwned(row.statusbar) then GameTooltip:Hide() end
+            row.entry, row.entryKey = nil, nil
             row:Hide()
         end
     end
@@ -314,7 +352,10 @@ local function StopUpdates()
         ticker:Cancel()
         ticker = nil
     end
-    for _, row in ipairs(plugin.Rows) do row:Hide() end
+    for _, row in ipairs(plugin.Rows) do
+        if GameTooltip:IsOwned(row.statusbar) then GameTooltip:Hide() end
+        row:Hide()
+    end
 end
 
 function plugin:OnDetailsEvent(event, ...)
@@ -346,7 +387,12 @@ function plugin:OnDetailsEvent(event, ...)
             frame:SetFrameLevel(instance.baseframe:GetFrameLevel() + 1)
         end
     elseif event == "DETAILS_INSTANCE_ENDSTRETCH" then
-        frame:SetFrameStrata("MEDIUM")
+        -- Back into the window's own layer (Details puts the plugin there), with the rows above its
+        -- right-click catcher again.
+        if instance then
+            frame:SetFrameStrata(instance.baseframe:GetFrameStrata())
+            RaiseRows(instance)
+        end
     end
 end
 
