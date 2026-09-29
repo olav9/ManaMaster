@@ -17,6 +17,11 @@ local MAX_HISTORY = 50
 -- Seconds before combat whose mana casts count toward the fight. Long enough for a pre-pull setup, e.g. a
 -- shaman dropping four totems on the global cooldown before the pull cast.
 local PRECOMBAT_WINDOW = 15
+local LARGE_GAIN_DEBUG = 100 -- /mm debug prints single mana increases at least this big (readable mana only)
+-- Winning or finishing an arena match refills mana just before the match-complete event ends the fight.
+-- A jump to full mana of at least this share of max, this close to the end, is taken as that refill.
+local ARENA_REFILL_MIN_SHARE = 0.1
+local ARENA_REFILL_WINDOW = 10 -- seconds before the fight ends
 local MAX_AURA_SCAN = 64 -- buff slots to check; a slot that errors doesn't tell us whether more follow
 local PREFIX = "|cff3fa9f5ManaMaster|r "
 
@@ -721,6 +726,18 @@ local function EndFight(success)
         end
     end
 
+    -- An arena match refills mana as it ends. If the last gain was that refill, it isn't mana recovered during
+    -- the match: take it out of recovered and keep it as matchRefill, shown greyed out in the panel.
+    local lastGain = fight.lastGain
+    fight.lastGain = nil
+    if fight.isArena and lastGain and lastGain.toMax and fight.recovered
+        and now - lastGain.time <= ARENA_REFILL_WINDOW
+        and lastGain.amount >= fight.maxMana * ARENA_REFILL_MIN_SHARE then
+        fight.recovered = fight.recovered - lastGain.amount
+        fight.matchRefill = lastGain.amount
+        Debug("arena match-end refill", lastGain.amount, "not counted as recovered")
+    end
+
     fight.duration = now - fight.startClock
     fight.endMana = fight.lastMana
     fight.success = success
@@ -772,6 +789,14 @@ local function OnManaChanged()
             end
         elseif delta > 0 then
             current.recovered = current.recovered + delta
+            -- Remembered so an arena's match-end refill can be taken back out at the end (see EndFight).
+            local maxMana = UnitPowerMax("player", MANA)
+            current.lastGain = { amount = delta, time = GetTime(),
+                toMax = IsReadable(maxMana) and mana >= maxMana }
+            -- Debug aid for "Unaccounted" recovery: large single jumps point at an unlogged mana source.
+            if delta >= LARGE_GAIN_DEBUG then
+                Debug(date("%H:%M:%S"), "mana +" .. delta, "to", mana)
+            end
         end
     end
     current.lastMana = mana

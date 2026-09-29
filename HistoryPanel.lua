@@ -141,6 +141,7 @@ local function CombineFights(fights)
     }
     local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
         gainsMeasured = true, buffs = true, lowestMana = true, saved = true, regenSplit = true }
+    local matchRefill = 0
     local zones, zoneList = {}, {}
 
     for _, fight in ipairs(fights) do
@@ -156,6 +157,7 @@ local function CombineFights(fights)
             local pct = fight.lowestMana / fight.maxMana * 100
             combined.lowestMana = math.min(combined.lowestMana or pct, pct)
         end
+        matchRefill = matchRefill + (fight.matchRefill or 0)
         if fight.regenSplit then
             combined.regenSplit = combined.regenSplit
                 or { castingTime = 0, fullTime = 0, castingRegen = 0, fullRegen = 0 }
@@ -199,6 +201,7 @@ local function CombineFights(fights)
         if not everyFight then combined[field] = nil end
     end
     combined.gainsMeasured = all.gainsMeasured or nil
+    combined.matchRefill = matchRefill > 0 and matchRefill or nil
     combined.zone = table.concat(zoneList, ", ")
     return combined
 end
@@ -431,26 +434,50 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
     local buffTotal = estimated * scale
     local rest = passive - buffTotal
 
-    -- Split the rest (spirit, gear and base regen) by the five-second rule, in proportion to the regen the
-    -- game's rates predicted for each window (fight.regenSplit, from ManaMaster.lua). mp5 buffs apply in both
-    -- windows, so their share (by time) is taken out of each prediction first.
+    -- Regen by the five-second rule, from the game's rates times the time spent in each window
+    -- (fight.regenSplit, from ManaMaster.lua). mp5 buffs apply in both windows, so their share (by time)
+    -- is taken out of each prediction first.
     local split = fight.regenSplit
     local totalTime = split and (split.castingTime + split.fullTime) or 0
-    local baseCasting, baseFull = 0, 0
+    local predCasting, predFull = 0, 0
     if totalTime > 0 then
-        baseCasting = math.max(0, split.castingRegen - buffTotal * split.castingTime / totalTime)
-        baseFull = math.max(0, split.fullRegen - buffTotal * split.fullTime / totalTime)
+        predCasting = math.max(0, split.castingRegen - buffTotal * split.castingTime / totalTime)
+        predFull = math.max(0, split.fullRegen - buffTotal * split.fullTime / totalTime)
     end
-    if rest >= 1 and baseCasting + baseFull > 0 then
-        local casting = rest * baseCasting / (baseCasting + baseFull)
+    local predicted = predCasting + predFull
+    if rest >= 1 and predicted > 0 then
+        local casting, full, unaccounted
+        if fight.gainsMeasured then
+            -- TBC: recovery is measured, so show the windows at their predicted values and what nothing explains
+            -- as "Unaccounted", instead of hiding it inside the windows. If the predictions exceed the measured
+            -- rest (regen lost at full mana), scale them down to fit.
+            local fit = predicted > rest and rest / predicted or 1
+            casting, full = predCasting * fit, predFull * fit
+            unaccounted = rest - casting - full
+        else
+            -- WoW Forever: the rest is itself an estimate from the same rates, so split it in proportion.
+            casting = rest * predCasting / predicted
+            full, unaccounted = rest - casting, 0
+        end
+
+        -- Average rates the game reported (including mp5 buffs), to compare with the character sheet.
         local FormatDuration = ns.FormatDuration
+        local function Rate(regen, seconds)
+            return seconds > 0 and string.format("%.1f/s", regen / seconds) or "no time"
+        end
         if casting >= 1 then
             table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, mana = casting,
-                rank = FormatDuration(split.castingTime) .. " within the 5-second rule  ·  estimated split" })
+                rank = string.format("%s within the 5-second rule  ·  %s", FormatDuration(split.castingTime),
+                    Rate(split.castingRegen, split.castingTime)) })
         end
-        if rest - casting >= 1 then
-            table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = rest - casting,
-                rank = FormatDuration(split.fullTime) .. " outside the 5-second rule  ·  estimated split" })
+        if full >= 1 then
+            table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = full,
+                rank = string.format("%s outside the 5-second rule  ·  %s", FormatDuration(split.fullTime),
+                    Rate(split.fullRegen, split.fullTime)) })
+        end
+        if unaccounted >= 1 then
+            table.insert(children, { name = "Unaccounted", icon = UNKNOWN_ICON, mana = unaccounted,
+                rank = "measured recovery not explained by regen or logged gains" })
         end
     elseif rest >= 1 and #children > 0 then
         table.insert(children, { name = "Spirit and base regen", rank = "the rest", mana = rest, icon = GAIN_ICON })
@@ -511,6 +538,12 @@ local function BuildSections(fight)
             table.insert(gained, { name = "Wasted while regen blocked", rank = "estimated", mana = fight.wastedBlocked,
                 icon = WASTED_ICON, excluded = true })
         end
+    end
+
+    -- The arena's end-of-match refill: shown for completeness, but not mana recovered during the match.
+    if fight.matchRefill then
+        table.insert(gained, { name = "Match-end refill", rank = "arena refills mana as the match ends; not counted",
+            mana = fight.matchRefill, icon = GAIN_ICON, excluded = true })
     end
 
     local sections = {
