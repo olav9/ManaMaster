@@ -10,5 +10,6 @@
 ManaMaster.lua
 Mana_Forever.lua
 HistoryPanel.lua
+MeterWindow.lua
 MinimapButton.lua
 DetailsPlugin.lua

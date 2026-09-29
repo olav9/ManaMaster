@@ -613,6 +613,7 @@ local function BuildSections(fight)
 
     return sections
 end
+ns.BuildSections = BuildSections -- also used by the meter window (MeterWindow.lua)
 
 -- Bar animation: when the selection changes, each detail bar slides from its current width to its new one.
 -- Resizing the panel sets widths instantly instead, since it re-lays out every frame while dragging.

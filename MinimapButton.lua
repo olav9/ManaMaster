@@ -47,8 +47,12 @@ function ns.CreateMinimapButton()
     border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
     border:SetPoint("TOPLEFT")
 
-    button:SetScript("OnClick", function()
-        ns.ToggleHistory()
+    button:SetScript("OnClick", function(_, mouseButton)
+        if mouseButton == "RightButton" then
+            ns.ToggleMeter()
+        else
+            ns.ToggleHistory()
+        end
     end)
     button:SetScript("OnDragStart", function(self)
         self:SetScript("OnUpdate", OnDragUpdate)
@@ -60,6 +64,7 @@ function ns.CreateMinimapButton()
         GameTooltip:SetOwner(self, "ANCHOR_LEFT")
         GameTooltip:AddLine("ManaMaster")
         GameTooltip:AddLine("Click to open fight history", 1, 1, 1)
+        GameTooltip:AddLine("Right-click to show the mana meter", 1, 1, 1)
         GameTooltip:AddLine("Drag to move", 0.7, 0.7, 0.7)
         GameTooltip:Show()
     end)

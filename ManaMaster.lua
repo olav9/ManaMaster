@@ -910,6 +910,7 @@ local function OnAddonLoaded()
     ns.char = char
     ns.charName = UnitName("player")
     ns.CreateMinimapButton()
+    ns.InitMeter()
     ns.Mana.Init()
 
     -- Handles /reload mid-combat.
@@ -1022,6 +1023,8 @@ SlashCmdList.MANAMASTER = function(msg)
         else
             print(PREFIX .. "No fights recorded yet.")
         end
+    elseif msg == "meter" then
+        ns.ToggleMeter()
     elseif msg == "minimap" then
         ns.SetMinimapButtonShown(not ns.db.showMinimapButton)
         print(PREFIX .. "minimap button " .. (ns.db.showMinimapButton and "shown" or "hidden"))
@@ -1041,6 +1044,6 @@ SlashCmdList.MANAMASTER = function(msg)
     elseif msg == "clear" then
         ns.ClearHistory()
     else
-        print(PREFIX .. "commands: /mm (history panel) | last | minimap | toggle | debug | clear")
+        print(PREFIX .. "commands: /mm (history panel) | meter | last | minimap | toggle | debug | clear")
     end
 end
