@@ -17,6 +17,8 @@ local SPELL_ROW_HEIGHT = 20
 local SPELL_ICON_SIZE = 16
 local UNKNOWN_ICON = 134400 -- question mark
 local SPELL_NAME_LEFT = 4 + SPELL_ICON_SIZE + 6 -- name starts after the icon
+local BAR_LEFT = 4 + SPELL_ICON_SIZE + 1 -- bars start just after the icon, like the meter window's
+local ROW_FONT = "GameFontHighlight" -- same as the meter window's rows
 local ACCENT_R, ACCENT_G, ACCENT_B = 0.25, 0.66, 0.96
 local GAIN_R, GAIN_G, GAIN_B = 0.3, 0.85, 0.7 -- green-teal for mana gained, apart from the blue spend bars
 local GAIN_HEX = "4dd9b3"
@@ -297,8 +299,11 @@ local function SetRowIndent(row, indent)
     if row.indent == indent then return end
     row.indent = indent
     row.bar:ClearAllPoints()
-    row.bar:SetPoint("TOPLEFT", indent, 0)
-    row.bar:SetPoint("BOTTOMLEFT", indent, 0)
+    row.bar:SetPoint("TOPLEFT", indent + BAR_LEFT, 0)
+    row.bar:SetPoint("BOTTOMLEFT", indent + BAR_LEFT, 0)
+    row.track:ClearAllPoints()
+    row.track:SetPoint("TOPLEFT", indent + BAR_LEFT, 0)
+    row.track:SetPoint("BOTTOMRIGHT")
     row.icon:ClearAllPoints()
     row.icon:SetPoint("LEFT", 4 + indent, 0)
     row.name:ClearAllPoints()
@@ -328,17 +333,18 @@ local function GetEntryRow(i)
     local row = CreateFrame("Frame", nil, detail.sections)
     row:SetHeight(SPELL_ROW_HEIGHT) -- width follows the panel, set in ShowSections
 
-    -- Bar length shows the entry's mana relative to the largest entry in any section.
+    -- Bar length shows the entry's mana relative to the largest entry in any section. Flat colour on a faint
+    -- full-width track, starting after the icon (anchored by SetRowIndent), like the meter window.
+    row.track = row:CreateTexture(nil, "BACKGROUND", nil, -1)
+    row.track:SetColorTexture(1, 1, 1, 0.06)
     row.bar = row:CreateTexture(nil, "BACKGROUND")
-    row.bar:SetPoint("TOPLEFT")
-    row.bar:SetPoint("BOTTOMLEFT")
 
-    row.mana = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.mana = row:CreateFontString(nil, "OVERLAY", ROW_FONT)
     row.mana:SetPoint("RIGHT", -4, 0)
     row.mana:SetWidth(90)
     row.mana:SetJustifyH("RIGHT")
 
-    row.casts = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.casts = row:CreateFontString(nil, "OVERLAY", ROW_FONT)
     row.casts:SetPoint("RIGHT", row.mana, "LEFT", -4, 0)
     row.casts:SetWidth(40)
     row.casts:SetJustifyH("RIGHT")
@@ -356,7 +362,7 @@ local function GetEntryRow(i)
     row.iconButton:SetScript("OnEnter", ShowRowTooltip)
     row.iconButton:SetScript("OnLeave", GameTooltip_Hide)
 
-    row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    row.name = row:CreateFontString(nil, "OVERLAY", ROW_FONT)
     row.name:SetPoint("LEFT", SPELL_NAME_LEFT, 0)
     row.name:SetPoint("RIGHT", row.casts, "LEFT", -4, 0)
     row.name:SetJustifyH("LEFT")
@@ -733,12 +739,13 @@ local function ShowSections(fight)
                 fraction = entry.mana / top
             end
             if entry.excluded then
-                row.bar:SetColorTexture(WASTED_R, WASTED_G, WASTED_B, 0.3)
+                row.bar:SetColorTexture(WASTED_R, WASTED_G, WASTED_B, 0.6)
             else
                 -- Child rows get a fainter bar, so the parent row reads as the total.
-                row.bar:SetColorTexture(section.r, section.g, section.b, entry.child and 0.18 or 0.3)
+                row.bar:SetColorTexture(section.r, section.g, section.b, entry.child and 0.45 or 0.7)
             end
-            SetBarWidth(row, math.max(1, (detailWidth - indent) * fraction), wasVisible)
+            row.track:Show()
+            SetBarWidth(row, math.max(1, (detailWidth - indent - BAR_LEFT) * fraction), wasVisible)
             row.bar:Show()
             row:Show()
             y = y + SPELL_ROW_HEIGHT
@@ -757,6 +764,7 @@ local function ShowSections(fight)
             row.casts:SetText("")
             row.mana:SetText("")
             row.bar:Hide()
+            row.track:Hide()
             row:Show()
             y = y + SPELL_ROW_HEIGHT
         end
