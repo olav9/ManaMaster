@@ -13,7 +13,9 @@ local addonName, ns = ...
 --   OnCombatEnd()              the player left combat
 
 local MANA = Enum.PowerType.Mana
-local MAX_HISTORY = 50
+-- Fights kept per character: ManaMasterDB.maxFights, set with /mm keep N (a fight is ~2 KB saved).
+local DEFAULT_MAX_FIGHTS = 200
+local MIN_MAX_FIGHTS, MAX_MAX_FIGHTS = 10, 2000
 -- Seconds before combat whose mana casts count toward the fight. Long enough for a pre-pull setup, e.g. a
 -- shaman dropping four totems on the global cooldown before the pull cast.
 local PRECOMBAT_WINDOW = 15
@@ -52,6 +54,7 @@ local defaults = {
     enabled = true,
     showMinimapButton = true,
     minimapAngle = 225, -- bottom-left of the minimap
+    maxFights = DEFAULT_MAX_FIGHTS,
 }
 
 local frame = CreateFrame("Frame")
@@ -1119,7 +1122,8 @@ local function EndFight(success)
 
     local fights = ns.char.fights
     table.insert(fights, fight)
-    while #fights > MAX_HISTORY do
+    -- Oldest fights go first once over the limit (a lowered limit takes effect here, at the next fight end).
+    while #fights > (ns.db.maxFights or DEFAULT_MAX_FIGHTS) do
         table.remove(fights, 1)
     end
 
@@ -1415,9 +1419,24 @@ SlashCmdList.MANAMASTER = function(msg)
     elseif msg == "log clear" then
         ns.db.debugLog = {}
         print(PREFIX .. "debug log cleared")
+    elseif msg:match("^keep") then
+        -- /mm keep shows the limit; /mm keep N sets how many fights each character keeps.
+        local count = tonumber(msg:match("^keep%s+(%d+)$"))
+        if count then
+            count = math.min(MAX_MAX_FIGHTS, math.max(MIN_MAX_FIGHTS, count))
+            ns.db.maxFights = count
+            local extra = #ns.char.fights - count
+            print(PREFIX .. "keeping the last " .. count .. " fights per character"
+                .. (extra > 0 and (" (the oldest " .. extra .. " go when the next fight ends)") or ""))
+        else
+            print(PREFIX .. "keeping the last " .. (ns.db.maxFights or DEFAULT_MAX_FIGHTS)
+                .. " fights per character (" .. #ns.char.fights .. " stored). Change with /mm keep <"
+                .. MIN_MAX_FIGHTS .. "-" .. MAX_MAX_FIGHTS .. ">")
+        end
     elseif msg == "clear" then
         ns.ClearHistory()
     else
-        print(PREFIX .. "commands: /mm (history panel) | meter | last | minimap | toggle | debug | log clear | clear")
+        print(PREFIX .. "commands: /mm (history panel) | meter | last | minimap | toggle | debug | log clear"
+            .. " | keep [n] | clear")
     end
 end
