@@ -76,9 +76,27 @@ local function IsReadable(value)
     return value ~= nil and not (issecretvalue and issecretvalue(value))
 end
 
+-- Debug lines also go to ManaMasterDB.debugLog, so they can be read from the SavedVariables file after a
+-- /reload or logout (addons can't write other files). Capped to the newest DEBUG_LOG_MAX lines.
+local DEBUG_LOG_MAX = 5000
+
+local function AppendDebugLog(...)
+    local log = ns.db and ns.db.debugLog
+    if not log then return end
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local value = select(i, ...)
+        -- Secret values can't be turned into text here; print renders them, the log can't.
+        parts[i] = (issecretvalue and issecretvalue(value)) and "SECRET" or tostring(value)
+    end
+    table.insert(log, string.format("%s %.3f %s", date("%H:%M:%S"), GetTime(), table.concat(parts, " ")))
+    while #log > DEBUG_LOG_MAX do table.remove(log, 1) end
+end
+
 local function Debug(...)
     if ns.debugMode then
         print("|cff888888MM debug:|r", ...)
+        AppendDebugLog(...)
     end
 end
 
@@ -1274,6 +1292,12 @@ SlashCmdList.MANAMASTER = function(msg)
     elseif msg == "debug" then
         ns.debugMode = not ns.debugMode
         print(PREFIX .. "debug " .. (ns.debugMode and "on" or "off"))
+        ns.db.debugLog = ns.db.debugLog or {}
+        local _, class = UnitClass("player")
+        local _, powerToken = UnitPowerType("player")
+        AppendDebugLog("=== debug", ns.debugMode and "on" or "off", "|", ns.charName, class, powerToken,
+            "| build", select(4, GetBuildInfo()), "| version",
+            C_AddOns and C_AddOns.GetAddOnMetadata("ManaMaster", "Version"))
         if ns.debugMode then
             -- Show the on-screen display right away if a fight is already running.
             local current = ns.current
@@ -1284,9 +1308,12 @@ SlashCmdList.MANAMASTER = function(msg)
         else
             display:Hide()
         end
+    elseif msg == "log clear" then
+        ns.db.debugLog = {}
+        print(PREFIX .. "debug log cleared")
     elseif msg == "clear" then
         ns.ClearHistory()
     else
-        print(PREFIX .. "commands: /mm (history panel) | meter | last | minimap | toggle | debug | clear")
+        print(PREFIX .. "commands: /mm (history panel) | meter | last | minimap | toggle | debug | log clear | clear")
     end
 end

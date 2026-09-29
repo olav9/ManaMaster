@@ -175,7 +175,11 @@ Notes from the experiment:
 
 ## Testing
 
-In game, the addon folder must be named `ManaMaster` inside the client's `Interface\AddOns\` directory. Use `/reload` after making changes; new files or TOC changes need a full client restart. Both clients point at this project folder through directory junctions:
+In game, the addon folder must be named `ManaMaster` inside the client's `Interface\AddOns\` directory. Use `/reload` after making changes; new files or TOC changes need a full client restart. Both clients point at this project folder through directory junctions, relative to the WoW install folder:
 
 - WoW Forever: `_classic_beta_\Interface\AddOns\ManaMaster`
 - TBC Anniversary: `_anniversary_\Interface\AddOns\ManaMaster`
+
+**Debug log:** addons can't write files other than SavedVariables. While `/mm debug` is on, every `Debug` line is also appended to `ManaMasterDB.debugLog` (`AppendDebugLog`: time of day, `GetTime()`, the message; secret values as `SECRET`; newest 5,000 lines). Toggling debug writes an `=== debug on/off` header with the character, class, power type, build and addon version. `/mm log clear` empties it. The client writes the file only on `/reload`, logout or exit, to `<client folder>\WTF\Account\<account>\SavedVariables\ManaMaster.lua`.
+
+The same file holds the saved fights (`ManaMasterDB.characters[...].fights`), so fight data can be read there too.
