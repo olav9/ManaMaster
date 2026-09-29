@@ -776,37 +776,26 @@ local function ShowDetail(fight)
             date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
     end
 
+    -- One summary line: Spent, Regen and Start mana. The breakdowns (net, potions, estimates) are in the
+    -- sections below. Regen is the measured recovery where mana was readable (TBC), otherwise the estimate.
+    local parts = { "Spent " .. FormatNumber(fight.spent) }
     if fight.recovered then
-        local net = fight.recovered - fight.spent
-        local lowestPct = fight.maxMana > 0 and (fight.lowestMana or 0) / fight.maxMana * 100 or 0
-        detail.stats:SetText(string.format("Spent %s   Recovered %s   Net %s%s   Lowest %d%%",
-            FormatNumber(fight.spent), FormatNumber(fight.recovered),
-            net >= 0 and "+" or "-", FormatNumber(math.abs(net)), lowestPct))
+        table.insert(parts, "Regen " .. FormatNumber(fight.recovered))
     elseif fight.regen then
-        -- Mana was hidden: spent is from spell costs, regen and potions are estimated.
-        local restored = ns.RestoredTotal(fight)
-        local net = fight.regen + restored - fight.spent
-        local restoredText = restored > 0 and ("   Potions/drinks ~" .. FormatNumber(restored)) or ""
-        detail.stats:SetText(string.format("Spent %s   Regen ~%s%s   Net %s%s\n|cff888888Spent from spell costs, regen and potions estimated|r",
-            FormatNumber(fight.spent), FormatNumber(fight.regen), restoredText,
-            net >= 0 and "+" or "-", FormatNumber(math.abs(net))))
-    else
-        detail.stats:SetText("Spent " .. FormatNumber(fight.spent) .. "  |cff888888(from spell costs)|r")
+        table.insert(parts, "Regen ~" .. FormatNumber(fight.regen))
     end
-
-    -- Starting mana drives the wasted-regen estimate, so show where it came from.
-    if fight.startMana and fight.wastedFull then
+    -- Combined fights have no single start mana; fights saved before it was tracked have none either.
+    if fight.startMana and fight.maxMana and fight.maxMana > 0 and not fight.isCombined then
         local pct = fight.startMana / fight.maxMana * 100 + 0.5
-        local startText
         if fight.startManaAssumed then
-            startText = "assumed full (not confirmed since login)"
+            table.insert(parts, "Start mana assumed full")
         elseif fight.gainsMeasured then
-            startText = string.format("%d%%", pct) -- TBC: read directly
+            table.insert(parts, string.format("Start mana %d%%", pct)) -- TBC: read directly
         else
-            startText = string.format("~%d%% (estimated)", pct)
+            table.insert(parts, string.format("Start mana ~%d%% (est.)", pct))
         end
-        detail.stats:SetText(detail.stats:GetText() .. "\n|cff888888Start mana " .. startText .. "|r")
     end
+    detail.stats:SetText(table.concat(parts, "   "))
 
     detail.sections:Show()
     local sectionsHeight = ShowSections(fight)
