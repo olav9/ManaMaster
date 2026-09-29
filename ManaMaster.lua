@@ -612,18 +612,10 @@ end
 -- buff that was up. Without a reducer buff, small differences are ignored as regen noise.
 -- fight.saved is keyed by reducer buff ("Clearcasting#16246", "Inner Focus#14751", "Other reduction"):
 --   { name, spellID, icon, talent, casts, mana, spells = { [spellID] = { name, rank, casts, mana, normalCost } } }
-local function RecordSaving(fight, spellID, paid, snap, reducersAfter)
-    local normal = NormalCost(spellID, snap, reducersAfter)
-    if not fight or not normal or paid >= normal then return end
-    local saved = normal - paid
-    local sourceName, info = FirstReducer(snap and snap.reducers or {})
-    if not sourceName then
-        sourceName, info = FirstReducer(reducersAfter)
-    end
-    if not sourceName then
-        if saved < math.max(5, normal * 0.1) then return end
-        sourceName, info = "Other reduction", {}
-    end
+-- Books a saving worked out by RecordSaving into the fight.
+local function ApplySaving(fight, spellID, saving)
+    local saved, normal, paid = saving.saved, saving.normal, saving.paid
+    local sourceName, info = saving.sourceName, saving.info
 
     local key = sourceName .. (info.spellID and ("#" .. info.spellID) or "")
     local source = fight.saved[key]
@@ -657,6 +649,36 @@ local function RecordSaving(fight, spellID, paid, snap, reducersAfter)
     entry.mana = entry.mana + saved
     entry.normalCost = normal
     Debug("mana saved", entry.name, saved, "via", sourceName, info.spellID or "", "| normal", normal, "paid", paid)
+end
+
+-- Works out the saving on a cast (normal cost minus paid, and the reducer buff to credit) and books it.
+-- Before combat it's kept with the pre-pull casts and booked when the fight starts, like their costs:
+-- a pull cast on a Clearcasting proc still counts as saved. That includes casts that end up free, which
+-- aren't kept as mana casts (they cost nothing).
+local function RecordSaving(fight, spellID, paid, snap, reducersAfter)
+    local normal = NormalCost(spellID, snap, reducersAfter)
+    if not normal or paid >= normal then return end
+    local saved = normal - paid
+    local sourceName, info = FirstReducer(snap and snap.reducers or {})
+    if not sourceName then
+        sourceName, info = FirstReducer(reducersAfter)
+    end
+    if not sourceName then
+        if saved < math.max(5, normal * 0.1) then return end
+        sourceName, info = "Other reduction", {}
+    end
+
+    local saving = { saved = saved, normal = normal, paid = paid, sourceName = sourceName, info = info }
+    if fight then
+        ApplySaving(fight, spellID, saving)
+    else
+        Debug("mana saved before combat", C_Spell.GetSpellName(spellID) or spellID, saved, "via", sourceName)
+        local now = GetTime()
+        table.insert(recentCasts, { time = now, spellID = spellID, saving = saving })
+        while #recentCasts > 0 and now - recentCasts[1].time > PRECOMBAT_WINDOW do
+            table.remove(recentCasts, 1)
+        end
+    end
 end
 
 ns.ScanAuras = ScanAuras
@@ -1012,10 +1034,12 @@ local function StartFight(encounterName)
     -- began, so add them to spent. The client file already saw them through OnManaSpend.
     for _, cast in ipairs(recentCasts) do
         if now - cast.time <= PRECOMBAT_WINDOW then
-            if not cast.gain then
+            if not cast.gain and not cast.saving then
                 Debug("pre-combat cast", cast.spellID, cast.power or "MANA", "cost", cast.cost)
             end
-            if cast.gain then
+            if cast.saving then
+                ApplySaving(fight, cast.spellID, cast.saving) -- e.g. a pull cast on a Clearcasting proc
+            elseif cast.gain then
                 AddPowerGain(fight, cast.spellID, cast.gain) -- e.g. the Charge that started the fight
             elseif cast.power then
                 AddPowerCast(fight, cast.power, cast.spellID, cast.cost)
