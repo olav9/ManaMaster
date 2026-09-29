@@ -60,9 +60,9 @@ Findings, from TBC with a level 70 elemental shaman:
   - Move it by dragging the title, resize it with the corner grip, and scale it with Ctrl + mouse wheel. The background is semi-transparent (alpha 0.7). Rows are 20 px with `GameFontHighlight` text, like the history panel's detail rows. Row height and spacing are snapped to whole screen pixels at the window's scale (`RowMetrics`, via `PixelUtil.GetNearestPixelSize`), because unsnapped 1-unit gaps rendered as 0–2 pixels. The title's icon sits over the row-icon column, and the section selector starts where row text starts (`TEXT_LEFT`). Bars are flat colour (`WHITE8x8`, no gradient). Hovering a row shows the spell's tooltip.
   - State (shown, position, size, scale, section) is in `ManaMasterDB.meter` (account-wide) and restored by `ns.InitMeter()` on load.
   - Toggle it with `/mm meter` or by right-clicking the minimap button; left-click still opens the history panel.
-- `DetailsPlugin.lua`: a Details! plugin showing **Mana spent** per spell inside a Details window. Both TOCs list Details as `## OptionalDeps`, and the file does nothing when Details isn't loaded.
+- `DetailsPlugin.lua`: a Details! plugin showing **resource spent** per spell inside a Details window: the fight's main power (mana, rage or energy). Both TOCs list Details as `## OptionalDeps`, and the file does nothing when Details isn't loaded.
   - It's a `"RAID"` plugin, modelled on Details' Tiny Threat (`DetailsReference/Details_TinyThreat`). It's created with `Details:NewPluginObject("Details_ManaMaster")` and installed as `DETAILS_PLUGIN_MANAMASTER` when Details forwards the plugin frame's `PLAYER_LOGIN` as `OnEvent(_, "ADDON_LOADED", frameName)`.
-  - Players pick "ManaMaster: Mana Spent" from Details' plugin menu (orange cogwheel).
+  - Players pick "ManaMaster: Resource Spent" from Details' plugin menu (orange cogwheel).
   - It draws `Details.gump:NewBar` rows in the window's row style, refreshing every 0.5 s while shown. Bar values slide to their new value over 0.3 s (`SetRowValue`, with its own OnUpdate driver, since Details' bars set values instantly). Newly shown rows grow from 0.
   - It follows the selected Details segment of whichever window's segment changed most recently (`DETAILS_INSTANCE_CHANGESEGMENT`, which passes the window; `followInstance`), starting with its own window. So choosing a segment in the main damage window also switches the plugin. It reads that window's `instance:GetShowingCombat()`: it shows the ManaMaster fights whose time overlaps the segment, with 2 s slack, spells merged.
     - Matching uses game-clock times: Details' `GetStartTime`/`GetEndTime` against the fight's `gameStart`/`gameEnd`, which `EndFight` now stores.
@@ -119,6 +119,22 @@ Findings, from TBC with a level 70 elemental shaman:
   - It's wrapped in `pcall`; if the client refuses, the bar hides for the session.
   - Confirmed working in game on WoW Forever, so rendering secret values this way works on this client.
   - It updates on `UNIT_POWER_FREQUENT` and `UNIT_MAXPOWER` while the display is shown.
+
+## Rage and energy (0.2.0)
+
+Rage and energy are tracked beside mana, which works exactly as before. Versions: `## Version` in both TOCs; git tags `v0.1.0` (mana only) and `v0.2.0` (rage/energy).
+
+- **Fights without mana:** `StartFight` used to require max mana > 0, so warriors and rogues never got a fight. Now it only requires a readable max. `fight.primaryPower` is the `UnitPowerType` token at fight start (`"MANA"`, `"RAGE"`, `"ENERGY"`; `"MANA"` if unreadable).
+- **Data:** `fight.powers[token]` (`OTHER_POWERS` in `ManaMaster.lua`: RAGE, ENERGY), created by `PowerEntry` on first use, since a druid can shift mid-fight. Fields: `spent`, `gained`, `castSpent`, `spells` (same shape as `fight.spells`, amounts in `mana`), `gains`, `wasted`, `cappedTime`, `wastedCap`, `hidden`, `max`.
+  - `spent`/`gained` come from `UNIT_POWER_FREQUENT` deltas (`OnOtherPowerChanged`). If the value is ever secret, `hidden` is set and `FinishPowers` sets `spent = castSpent` and `gained = nil`.
+  - Per-ability costs come from `GetOtherPowerCosts` (the RAGE/ENERGY entries of `C_Spell.GetSpellPowerCost`), snapshotted at `UNIT_SPELLCAST_SENT` like mana, and added with `AddPowerCast`. Pre-combat casts count as for mana.
+  - Energy: time at max energy (`cappedTime`) times the regen rate is `wastedCap`, energy lost to capping (estimated).
+  - TBC: rage/energy energizes aimed at the player (e.g. Bloodrage, Thistle Tea) go into `powers[token].gains`, overflow into `wasted`.
+- **Known sources (estimated):** where gains aren't logged (`ns.Mana.logsPowerGains` is only set by `Mana_TBC.lua`), `GetPowerGain` parses the cast's lower-cased English description with `POWER_GAIN_PATTERNS` ("rage by X to Y" for Rage Potions, "generate(s) X rage" for Charge/Bloodrage, "restores X energy" for Thistle Tea, ...), adding a Bloodrage-style "an additional X rage". `KNOWN_POWER_GAINS` is the fallback (Bloodrage 2687, Charge ranks 100/6178/11578). `AddPowerGain` books the average into `powers[token].gains` with `estimated = true`, shown as "…, estimated". A Charge just before combat is kept in `recentCasts` (`gain`) for the fight. Talent bonuses (e.g. Improved Charge) and passive procs aren't in the descriptions, so they're missed. When rage is readable, the "From damage dealt and taken" row is the measured total minus these estimates.
+- **Forever warrior:** rage is expected to be secret like mana, so only spending from listed costs is known. The gained section then lists only the estimated known sources, with a grey `note` row saying rage from damage is hidden (or `emptyText` if there are none), and the summary says "Generated ~X from known sources". **Untested in game.**
+- **History panel:** `BuildSections(fight, power)` dispatches rage/energy to `BuildPowerSections`: "Rage spent"/"Rage generated" or "Energy spent"/"Energy gained". The gained section lists logged sources, the measured rest ("From damage dealt and taken" / "Energy regeneration") and grey overflow/capped rows. Sections can carry `emptyText`. The shown power is `ResolvePower(fight)`: the pick from the power button (top right of the details pane, shown only when a fight has more than one power, e.g. a druid), else the fight's `primaryPower`. The pick sticks across fights. Fight list rows show spending in the fight's main power (`PrimarySpent`). `CombineFights` merges `powers`.
+- **Meter window:** the section menu lists only the character's powers (`AvailableSections`: druids get all three; others their main power, plus mana if they have any). An unavailable saved choice falls back to the first available section, i.e. the main power's spent.
+- **Details plugin:** shows each fight's main power's spells (`PowerSpells`), with the game's power colour for rage/energy.
 
 ## Combat log chat tab experiment (concluded: dead end)
 

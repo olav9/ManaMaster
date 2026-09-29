@@ -49,6 +49,16 @@ local function OnCombatLogEvent()
 
     if ENERGIZE_EVENTS[subevent] then
         local overEnergize, powerType = arg16 or 0, arg17
+        -- Rage and energy gains (e.g. Bloodrage, Thistle Tea) go to that power's entry, overflow as wasted.
+        local otherToken = ns.POWER_TOKEN_BY_TYPE[powerType]
+        if otherToken then
+            local power = ns.PowerEntry(fight, otherToken)
+            local entry = AddEntry(power.gains, spellID, spellName, amount)
+            entry.periodic = entry.periodic or subevent == "SPELL_PERIODIC_ENERGIZE"
+            power.wasted = power.wasted + overEnergize
+            ns.Debug("energize", otherToken, spellName, amount)
+            return
+        end
         if powerType ~= MANA then return end
         -- amount is what was gained; overEnergize is what didn't fit under max mana.
         local entry = AddEntry(fight.gains, spellID, spellName, amount)
@@ -71,6 +81,7 @@ local combatLogFrame = CreateFrame("Frame")
 combatLogFrame:SetScript("OnEvent", OnCombatLogEvent)
 
 ns.Mana = {}
+ns.Mana.logsPowerGains = true -- rage/energy gains come from the combat log, so the core doesn't estimate them
 
 function ns.Mana.Init()
     playerGUID = UnitGUID("player")

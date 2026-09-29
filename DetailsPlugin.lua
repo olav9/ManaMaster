@@ -1,6 +1,7 @@
 local addonName, ns = ...
 
--- Details! plugin: shows ManaMaster's "Mana spent" per spell inside a Details window. It's a "RAID" plugin
+-- Details! plugin: shows ManaMaster's resource spent per spell inside a Details window: mana, or rage or energy
+-- for fights whose main power is one of those, e.g. a warrior's or a rogue's. It's a "RAID" plugin
 -- (like Details' own Tiny Threat): picked from the plugin menu (orange cogwheel), it takes over the window
 -- and draws its own bars with the window's row style. It shows the running fight live, or the last fight
 -- when out of combat. Only active when Details is loaded (an optional dependency in the TOCs).
@@ -8,7 +9,7 @@ local addonName, ns = ...
 local Details = _G.Details
 if not (Details and Details.NewPluginObject and Details.InstallPlugin) then return end
 
-local PLUGIN_NAME = "ManaMaster: Mana Spent"
+local PLUGIN_NAME = "ManaMaster: Resource Spent"
 local PLUGIN_ID = "DETAILS_PLUGIN_MANAMASTER" -- Details' absolute plugin name; also becomes a global
 local FRAME_NAME = "Details_ManaMaster"
 local PLUGIN_ICON = "Interface\\Icons\\INV_Elemental_Mote_Mana"
@@ -19,7 +20,7 @@ local ICON_COORDS = { 0.08, 0.92, 0.08, 0.92 }
 
 local plugin = Details:NewPluginObject(FRAME_NAME)
 local frame = plugin.Frame
-plugin:SetPluginDescription("Mana spent per spell, from ManaMaster: the current fight live, or the last fight.")
+plugin:SetPluginDescription("Mana, rage or energy spent per ability, from ManaMaster: the current fight live, or the last fight.")
 plugin.Rows = {}
 plugin.canShow = 0
 
@@ -148,12 +149,27 @@ local function FightsForSegment()
     return matched
 end
 
--- Per-spell spending of several fights added together, most mana first.
+-- A fight's per-spell spending in its main power: rage for a warrior, energy for a rogue, else mana.
+-- Returns the spells table and the power token.
+local function PowerSpells(fight)
+    local token = fight.primaryPower
+    local entry = token and token ~= "MANA" and fight.powers and fight.powers[token]
+    if entry then return entry.spells, token end
+    return fight.spells, "MANA"
+end
+
+-- Per-spell spending of several fights added together, most first. Also returns the power shown: the
+-- first fight's, or nil if the fights spent different powers.
 local function MergedSpells(fights)
-    if #fights == 1 then return ns.SortedEntries(fights[1].spells) end
+    local shownPower
+    for i, fight in ipairs(fights) do
+        local _, token = PowerSpells(fight)
+        if i == 1 then shownPower = token elseif token ~= shownPower then shownPower = nil end
+    end
+    if #fights == 1 then return ns.SortedEntries((PowerSpells(fights[1]))), shownPower end
     local merged = {}
     for _, fight in ipairs(fights) do
-        for key, data in pairs(fight.spells or {}) do
+        for key, data in pairs(PowerSpells(fight) or {}) do
             local entry = merged[key]
             if not entry then
                 entry = { casts = 0, mana = 0, spellID = data.spellID, name = data.name or key, rank = data.rank }
@@ -163,7 +179,16 @@ local function MergedSpells(fights)
             entry.mana = entry.mana + (data.mana or 0)
         end
     end
-    return ns.SortedEntries(merged)
+    return ns.SortedEntries(merged), shownPower
+end
+
+local POWER_LABELS = { MANA = "mana", RAGE = "rage", ENERGY = "energy" }
+
+-- Bar colour per power: mana keeps the history panel's blue, rage and energy use the game's power colours.
+local function BarColor(token)
+    local color = token ~= "MANA" and PowerBarColor and PowerBarColor[token]
+    if color then return color.r, color.g, color.b end
+    return BAR_R, BAR_G, BAR_B
 end
 
 local function NewRow(i)
@@ -245,7 +270,8 @@ end
 local function Update()
     local ok, fights = pcall(FightsForSegment)
     if not ok then fights = DefaultFights() end -- a Details version with different segment data
-    local spells = MergedSpells(fights)
+    local spells, power = MergedSpells(fights)
+    local barR, barG, barB = BarColor(power or "MANA")
     local total = 0
     for _, spell in ipairs(spells) do total = total + spell.mana end
     local top = spells[1] and spells[1].mana or 0
@@ -254,7 +280,8 @@ local function Update()
         local spell = spells[i]
         if i == 1 and not spell and plugin.canShow > 0 then
             -- Say why the window is empty rather than showing nothing.
-            row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment" or "No mana spent")
+            row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment"
+                or ("No " .. (POWER_LABELS[power] or "power") .. " spent"))
             row:SetRightText("")
             animatingRows[row] = nil
             row.animValue = 0
@@ -268,7 +295,7 @@ local function Update()
             -- A row that showed a different spell before (spells reorder as mana changes) slides from there too.
             SetRowValue(row, top > 0 and spell.mana / top * 100 or 0, row.statusbar:IsShown())
             row:SetIcon(C_Spell.GetSpellTexture(spell.spellID or spell.name) or UNKNOWN_ICON, ICON_COORDS)
-            row:SetColor(BAR_R, BAR_G, BAR_B)
+            row:SetColor(barR, barG, barB)
             row:Show()
         else
             row:Hide()

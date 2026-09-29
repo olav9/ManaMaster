@@ -2,7 +2,8 @@ local _, ns = ...
 
 -- Meter window: a compact, damage-meter-style bar window for the active fight (the running fight live in
 -- combat, otherwise the last one). It shows one section of the history panel's details at a time (Mana
--- spent, Mana gained, Regen buff uptime, Mana saved, Mana drained), chosen by clicking the title. It's
+-- spent, Mana gained, Regen buff uptime, Mana saved, Mana drained, and Rage/Energy spent and gained for
+-- characters with those), chosen by clicking the title. It's
 -- movable (drag the title), resizable (corner grip), scalable (Ctrl + mouse wheel) and semi-transparent.
 -- Its state is saved in ManaMasterDB.meter. Toggle with /mm meter or by right-clicking the minimap button.
 
@@ -28,8 +29,52 @@ local UNKNOWN_ICON = 134400
 local ADDON_ICON = "Interface\\Icons\\INV_Elemental_Mote_Mana" -- same as the minimap button and the TOCs
 local ICON_COORDS = { 0.08, 0.92, 0.08, 0.92 }
 
--- The sections, in the history panel's order; titles match BuildSections in HistoryPanel.lua.
-local SECTIONS = { "Mana spent", "Mana gained", "Regen buff uptime", "Mana saved", "Mana drained" }
+-- The sections per power, in the history panel's order; titles match BuildSections in HistoryPanel.lua.
+local POWER_SECTIONS = {
+    { power = "MANA", titles = { "Mana spent", "Mana gained", "Regen buff uptime", "Mana saved", "Mana drained" } },
+    { power = "RAGE", titles = { "Rage spent", "Rage generated" } },
+    { power = "ENERGY", titles = { "Energy spent", "Energy gained" } },
+}
+local SECTION_POWER = {} -- section title -> power token
+for _, group in ipairs(POWER_SECTIONS) do
+    for _, title in ipairs(group.titles) do SECTION_POWER[title] = group.power end
+end
+
+-- The sections this character can use: all of them for druids, otherwise the main power's and mana's
+-- (if the character has mana), the main power first.
+local function AvailableSections()
+    local _, class = UnitClass("player")
+    local _, mainPower = UnitPowerType("player")
+    if not ns.IsReadable(mainPower) then mainPower = nil end
+    local maxMana = UnitPowerMax("player", Enum.PowerType.Mana)
+    local hasMana = ns.IsReadable(maxMana) and maxMana > 0
+    local list = {}
+    local function AddPower(token)
+        for _, group in ipairs(POWER_SECTIONS) do
+            if group.power == token then
+                for _, title in ipairs(group.titles) do table.insert(list, title) end
+            end
+        end
+    end
+    if class == "DRUID" then
+        AddPower("MANA"); AddPower("RAGE"); AddPower("ENERGY")
+        return list
+    end
+    if mainPower == "RAGE" or mainPower == "ENERGY" then AddPower(mainPower) end
+    if hasMana or #list == 0 then AddPower("MANA") end
+    return list
+end
+
+-- The chosen section, or the first available one if the choice doesn't apply to this character.
+local function CurrentSection()
+    local chosen = ns.db.meter.section
+    local available = AvailableSections()
+    for _, title in ipairs(available) do
+        if title == chosen then return chosen end
+    end
+    return available[1]
+end
+local MAX_MENU_ITEMS = 9
 
 local frame, titleButton, titleText, totalText, menu, content
 local rows = {}
@@ -186,7 +231,7 @@ end
 
 local function Update()
     if not frame or not frame:IsShown() then return end
-    local title = Settings().section
+    local title = CurrentSection()
     titleText:SetText(title)
     totalText:SetText("")
 
@@ -195,7 +240,7 @@ local function Update()
         ShowMessage("No fights recorded yet")
         return
     end
-    local section = FindSection(ns.BuildSections(fight), title)
+    local section = FindSection(ns.BuildSections(fight, SECTION_POWER[title]), title)
     if not section then
         ShowMessage("Not tracked for this fight")
         return
@@ -216,7 +261,7 @@ local function Update()
         totalText:SetText((total > 0 and section.sign or "") .. ns.FormatNumber(total))
     end
     if #entries == 0 then
-        ShowMessage("None recorded")
+        ShowMessage(section.emptyText or "None recorded")
         return
     end
 
@@ -266,10 +311,19 @@ local function ToggleMenu()
         menu:Hide()
         return
     end
-    for _, button in ipairs(menu.buttons) do
-        local isCurrent = button.section == Settings().section
-        button.text:SetText((isCurrent and "|cffffd100" or "") .. button.section)
+    -- The menu lists only the sections for this character's powers.
+    local available, current = AvailableSections(), CurrentSection()
+    for i, button in ipairs(menu.buttons) do
+        local section = available[i]
+        button.section = section
+        if section then
+            button.text:SetText((section == current and "|cffffd100" or "") .. section)
+            button:Show()
+        else
+            button:Hide()
+        end
     end
+    menu:SetHeight(math.min(#available, #menu.buttons) * 18 + 4)
     menu:Show()
 end
 
@@ -281,19 +335,18 @@ local function CreateMenu()
     menu:SetBackdropBorderColor(0, 0, 0, 1)
     menu:SetPoint("TOPLEFT", titleButton, "BOTTOMLEFT", 0, -1)
     menu:SetFrameStrata("DIALOG")
-    menu:SetSize(140, #SECTIONS * 18 + 4)
+    menu:SetSize(140, 4)
     menu:Hide()
     menu.buttons = {}
-    for i, section in ipairs(SECTIONS) do
+    for i = 1, MAX_MENU_ITEMS do
         local button = CreateFrame("Button", nil, menu)
         button:SetSize(136, 18)
         button:SetPoint("TOPLEFT", 2, -2 - (i - 1) * 18)
         button:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
         button.text = button:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
         button.text:SetPoint("LEFT", 6, 0)
-        button.section = section
-        button:SetScript("OnClick", function()
-            Settings().section = section
+        button:SetScript("OnClick", function(self)
+            Settings().section = self.section
             menu:Hide()
             wipe(animatingRows)
             for _, row in ipairs(rows) do row:Hide() end -- new section: bars grow in fresh
@@ -450,6 +503,6 @@ end
 function ns.InitMeter()
     ns.db.meter = ns.db.meter or {}
     local settings = ns.db.meter
-    settings.section = settings.section or SECTIONS[1]
+    -- No stored default: CurrentSection falls back to the character's main power's spent section.
     if settings.shown then ns.ToggleMeter(true) end
 end

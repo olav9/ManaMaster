@@ -2,7 +2,7 @@
 ## Title: ManaMaster
 ## Notes: Mana tracking and management
 ## Author: olsen
-## Version: 0.1.0
+## Version: 0.2.0
 ## SavedVariables: ManaMasterDB
 ## OptionalDeps: Details
 ## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana

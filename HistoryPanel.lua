@@ -125,7 +125,8 @@ local function MergeEntries(target, source)
     for key, data in pairs(source or {}) do
         local entry = target[key]
         if not entry then
-            entry = { casts = 0, mana = 0, spellID = data.spellID, name = data.name or key, rank = data.rank }
+            entry = { casts = 0, mana = 0, spellID = data.spellID, name = data.name or key, rank = data.rank,
+                estimated = data.estimated }
             target[key] = entry
         end
         entry.casts = entry.casts + (data.casts or 0)
@@ -199,6 +200,29 @@ local function CombineFights(fights)
             entry.uptime = entry.uptime + (data.uptime or 0)
             entry.mp5 = entry.mp5 or data.mp5
         end
+        -- Rage/energy: sums per power; gained is kept only if it's known in every fight that has the power.
+        for token, source in pairs(fight.powers or {}) do
+            combined.powers = combined.powers or {}
+            local target = combined.powers[token]
+            if not target then
+                target = { spent = 0, gained = 0, castSpent = 0, spells = {}, gains = {}, wasted = 0,
+                    cappedTime = 0, wastedCap = 0 }
+                combined.powers[token] = target
+            end
+            target.spent = target.spent + (source.spent or source.castSpent or 0)
+            if source.gained == nil then target.hidden = true end
+            target.gained = target.gained + (source.gained or 0)
+            target.wasted = target.wasted + (source.wasted or 0)
+            target.cappedTime = target.cappedTime + (source.cappedTime or 0)
+            target.wastedCap = target.wastedCap + (source.wastedCap or 0)
+            MergeEntries(target.spells, source.spells)
+            MergeEntries(target.gains, source.gains)
+        end
+        if combined.primaryPower == nil then
+            combined.primaryPower = fight.primaryPower
+        elseif combined.primaryPower ~= fight.primaryPower then
+            combined.primaryPower = false -- mixed; ResolvePower picks the first power the fights have
+        end
         if fight.zone and fight.zone ~= "" and not zones[fight.zone] then
             zones[fight.zone] = true
             table.insert(zoneList, fight.zone)
@@ -211,6 +235,10 @@ local function CombineFights(fights)
     combined.gainsMeasured = all.gainsMeasured or nil
     combined.matchRefill = matchRefill > 0 and matchRefill or nil
     combined.zone = table.concat(zoneList, ", ")
+    for _, power in pairs(combined.powers or {}) do
+        if power.hidden then power.gained = nil end
+    end
+    combined.primaryPower = combined.primaryPower or nil
     return combined
 end
 
@@ -481,8 +509,122 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
     return children
 end
 
--- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained.
-local function BuildSections(fight)
+------------------------------------------------------------------------------------------------------------
+-- Power types. Mana has the full set of sections; rage and energy (fight.powers, see ManaMaster.lua) have
+-- spent and gained. The panel shows the fight's main power unless another is picked with the power button.
+
+local POWER_LABELS = { MANA = "Mana", RAGE = "Rage", ENERGY = "Energy" }
+local POWER_ORDER = { "MANA", "RAGE", "ENERGY" }
+local POWER_GAIN_ICONS = {
+    RAGE = "Interface\\Icons\\Ability_Racial_BloodRage",
+    ENERGY = "Interface\\Icons\\INV_Drink_Milk_05", -- Thistle Tea
+}
+local selectedPower -- the power picked with the power button; nil = each fight's main power
+
+-- The powers a fight has data for, in POWER_ORDER.
+local function PowersOf(fight)
+    local list = {}
+    for _, token in ipairs(POWER_ORDER) do
+        local has
+        if token == "MANA" then
+            -- Combined fights always carry maxMana = 100, so they go by what was recorded instead.
+            has = (not fight.isCombined and (fight.maxMana or 0) > 0) or next(fight.spells or {}) ~= nil
+                or (fight.spent or 0) > 0 or (fight.recovered or 0) > 0
+        else
+            has = fight.powers and fight.powers[token] ~= nil
+        end
+        if has then table.insert(list, token) end
+    end
+    return list
+end
+
+-- The power to show for a fight: the picked one if the fight has it, else the fight's main power.
+local function ResolvePower(fight)
+    local powers = PowersOf(fight)
+    for _, token in ipairs(powers) do
+        if token == selectedPower then return token end
+    end
+    for _, token in ipairs(powers) do
+        if token == fight.primaryPower then return token end
+    end
+    return powers[1] or "MANA"
+end
+
+-- The fight's spending in its main power, for the fight list: rage for a warrior rather than mana.
+local function PrimarySpent(fight)
+    local entry = fight.powers and fight.primaryPower and fight.powers[fight.primaryPower]
+    if entry then return entry.spent or entry.castSpent or 0 end
+    return fight.spent or 0
+end
+
+local function PowerColor(token)
+    local color = PowerBarColor and PowerBarColor[token]
+    if color then return color.r, color.g, color.b end
+    return ACCENT_R, ACCENT_G, ACCENT_B
+end
+
+-- Sections for rage or energy: spent per ability, and gained (logged sources, the measured rest, and grey
+-- wasted rows). Where the value is hidden (e.g. rage on WoW Forever) only spending is known.
+local function BuildPowerSections(fight, token)
+    local entry = fight.powers and fight.powers[token]
+    local label = POWER_LABELS[token] or token
+    local r, g, b = PowerColor(token)
+    local hex = string.format("%02x%02x%02x", r * 255, g * 255, b * 255)
+    local gainIcon = POWER_GAIN_ICONS[token] or GAIN_ICON
+
+    local gained, emptyText, note = {}, nil, nil
+    if entry then
+        -- Logged (TBC) or estimated from the ability's description (Charge, Bloodrage, potions).
+        gained = ns.SortedEntries(entry.gains)
+        for _, gain in ipairs(gained) do
+            if gain.estimated then gain.rank = (gain.rank and (gain.rank .. ", ") or "") .. "estimated" end
+        end
+    end
+    if not entry then
+        emptyText = "No " .. label:lower() .. " tracked for this fight"
+    elseif entry.gained == nil then
+        -- Hidden: only the known sources above; the rest (e.g. rage from damage) can't be seen.
+        local rest = token == "RAGE" and "rage from damage dealt and taken" or "energy regeneration"
+        emptyText = label .. " is hidden on this client; " .. rest .. " isn't known"
+        note = #gained > 0 and ("Only known sources; " .. rest .. " is hidden") or nil
+    else
+        local logged = 0
+        for _, gain in ipairs(gained) do logged = logged + gain.mana end
+        local rest = entry.gained - logged
+        if rest >= 1 then
+            table.insert(gained, {
+                name = token == "RAGE" and "From damage dealt and taken" or (label .. " regeneration"),
+                rank = "measured, not from a known source", mana = rest, icon = gainIcon,
+            })
+        end
+        table.sort(gained, function(a, c) return a.mana > c.mana end)
+        if (entry.wasted or 0) >= 1 then
+            table.insert(gained, { name = "Overflow (past max)", mana = entry.wasted, icon = WASTED_ICON,
+                excluded = true })
+        end
+    end
+    if entry and (entry.wastedCap or 0) >= 1 then
+        table.insert(gained, { name = "Wasted at max " .. label:lower(),
+            rank = ns.FormatDuration(entry.cappedTime or 0) .. " at max  ·  estimated",
+            mana = entry.wastedCap, icon = WASTED_ICON, excluded = true })
+    end
+
+    return {
+        { title = label .. " spent", hex = hex, r = r, g = g, b = b, sign = "", countLabel = "Casts",
+          valueLabel = label, entries = entry and ns.SortedEntries(entry.spells) or {},
+          emptyText = not entry and emptyText or nil },
+        { title = token == "RAGE" and "Rage generated" or (label .. " gained"), hex = GAIN_HEX,
+          r = GAIN_R, g = GAIN_G, b = GAIN_B, sign = "+", countLabel = "Count", valueLabel = label,
+          entries = gained, emptyText = emptyText, note = note },
+    }
+end
+
+-- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained (mana), or
+-- spent and gained for rage/energy (power, default mana).
+local function BuildSections(fight, power)
+    if power and power ~= "MANA" then
+        return BuildPowerSections(fight, power)
+    end
     -- Mana gained comes in three flavours:
     --  * gainsMeasured (TBC, combat log): each energize source is exact; passive regen is what the measured
     --    recovery has left over after those.
@@ -637,9 +779,9 @@ local function SetBarWidth(row, width, wasVisible)
 end
 
 -- Lays out section headings and rows top to bottom; returns the total height used.
-local function ShowSections(fight)
+local function ShowSections(fight, power)
     local FormatNumber = ns.FormatNumber
-    local sections = BuildSections(fight)
+    local sections = BuildSections(fight, power)
 
     -- One scale for every mana bar, so gained, spent and drained lengths compare directly.
     -- Uptime bars use their own 0-100% scale.
@@ -729,14 +871,16 @@ local function ShowSections(fight)
             y = y + SPELL_ROW_HEIGHT
         end
 
-        if #entries == 0 then
+        -- A grey text row: why the section is empty, or a note under its rows (e.g. hidden rage).
+        local message = #entries == 0 and (section.emptyText or "None recorded") or section.note
+        if message then
             rowIndex = rowIndex + 1
             local row = GetEntryRow(rowIndex)
             row:ClearAllPoints()
             row:SetPoint("TOPLEFT", 0, -y)
             row:SetWidth(detailWidth)
             SetRowIndent(row, 0)
-            row.name:SetText("|cff888888None recorded|r")
+            row.name:SetText("|cff888888" .. message .. "|r")
             row.icon:Hide()
             row.iconButton:Hide()
             row.casts:SetText("")
@@ -757,6 +901,7 @@ local function ShowDetail(fight)
     local FormatNumber = ns.FormatNumber
 
     if not fight then
+        detail.powerButton:Hide()
         detail.title:SetText("No fights recorded yet.")
         detail.info:SetText("")
         detail.stats:SetText("")
@@ -778,14 +923,28 @@ local function ShowDetail(fight)
 
     -- One summary line: Spent, Regen and Start mana. The breakdowns (net, potions, estimates) are in the
     -- sections below. Regen is the measured recovery where mana was readable (TBC), otherwise the estimate.
+    -- Rage and energy: spent and gained, or only spent where the value is hidden.
+    local power = ResolvePower(fight)
     local parts = { "Spent " .. FormatNumber(fight.spent) }
-    if fight.recovered then
+    if power ~= "MANA" then
+        local entry = fight.powers and fight.powers[power]
+        parts = { "Spent " .. FormatNumber(entry and (entry.spent or entry.castSpent) or 0) }
+        local verb = power == "RAGE" and "Generated " or "Gained "
+        if entry and entry.gained then
+            table.insert(parts, verb .. FormatNumber(entry.gained))
+        elseif entry and next(entry.gains or {}) then
+            -- Hidden: only the estimated known sources (Charge, Bloodrage, potions).
+            local known = 0
+            for _, gain in pairs(entry.gains) do known = known + (gain.mana or 0) end
+            table.insert(parts, verb .. "~" .. FormatNumber(known) .. " from known sources")
+        end
+    elseif fight.recovered then
         table.insert(parts, "Regen " .. FormatNumber(fight.recovered))
     elseif fight.regen then
         table.insert(parts, "Regen ~" .. FormatNumber(fight.regen))
     end
     -- Combined fights have no single start mana; fights saved before it was tracked have none either.
-    if fight.startMana and fight.maxMana and fight.maxMana > 0 and not fight.isCombined then
+    if power == "MANA" and fight.startMana and fight.maxMana and fight.maxMana > 0 and not fight.isCombined then
         local pct = fight.startMana / fight.maxMana * 100 + 0.5
         if fight.startManaAssumed then
             table.insert(parts, "Start mana assumed full")
@@ -798,7 +957,19 @@ local function ShowDetail(fight)
     detail.stats:SetText(table.concat(parts, "   "))
 
     detail.sections:Show()
-    local sectionsHeight = ShowSections(fight)
+    -- The power button cycles through the fight's powers; it's only shown when there's more than one.
+    local powers = PowersOf(fight)
+    if #powers > 1 then
+        local r, g, b = PowerColor(power)
+        detail.powerButton:SetText(string.format("|cff%02x%02x%02x%s|r", r * 255, g * 255, b * 255,
+            POWER_LABELS[power] or power))
+        detail.powerButton.powers, detail.powerButton.power = powers, power
+        detail.powerButton:Show()
+    else
+        detail.powerButton:Hide()
+    end
+
+    local sectionsHeight = ShowSections(fight, power)
 
     local height = detail.title:GetStringHeight() + 4 + detail.info:GetStringHeight() + 8
         + detail.stats:GetStringHeight() + 14 + sectionsHeight
@@ -847,7 +1018,7 @@ function ns.RefreshHistory()
         local isLive = fight == ns.current
         local shown = isLive and live or fight
         row.name:SetText(shown.name .. (isLive and "  |cff40ff40in combat|r" or ResultText(shown)))
-        row.spent:SetText(ns.FormatNumber(shown.spent))
+        row.spent:SetText(ns.FormatNumber(PrimarySpent(shown)))
         row.info:SetText(string.format("%s  ·  %s  ·  %s", isLive and "Now" or date("%m/%d %H:%M", shown.date),
             ns.FormatDuration(shown.duration), shown.zone or ""))
         row.selected:SetShown(selected[fight] == true)
@@ -983,8 +1154,24 @@ local function CreatePanel()
     detail = {}
     detail.title = detailContent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     detail.title:SetPoint("TOPLEFT")
-    detail.title:SetPoint("TOPRIGHT")
+    detail.title:SetPoint("TOPRIGHT", -80, 0) -- room for the power button
     detail.title:SetJustifyH("LEFT")
+
+    -- Cycles the shown power (Mana / Rage / Energy) for fights with more than one, e.g. a druid's.
+    -- The pick sticks across fights; fights without that power show their main one.
+    detail.powerButton = CreateFrame("Button", nil, detailContent, "UIPanelButtonTemplate")
+    detail.powerButton:SetSize(72, 20)
+    detail.powerButton:SetPoint("TOPRIGHT", 0, 2)
+    detail.powerButton:SetScript("OnClick", function(self)
+        local powers, index = self.powers or {}, 1
+        for i, token in ipairs(powers) do
+            if token == self.power then index = i end
+        end
+        selectedPower = powers[index % #powers + 1]
+        animateBars = true
+        ns.RefreshHistory()
+    end)
+    detail.powerButton:Hide()
 
     detail.info = detailContent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     detail.info:SetPoint("TOPLEFT", detail.title, "BOTTOMLEFT", 0, -4)

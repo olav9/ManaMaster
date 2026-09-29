@@ -122,6 +122,7 @@ local function SortedEntries(entries)
             casts = data.casts,
             mana = data.mana,
             spellID = data.spellID,
+            estimated = data.estimated, -- rage/energy gains estimated from a description
         })
     end
     table.sort(list, function(a, b) return a.mana > b.mana end)
@@ -152,6 +153,194 @@ local function GetManaCost(spellID)
         end
     end
     return cost
+end
+
+------------------------------------------------------------------------------------------------------------
+-- Rage and energy. Tracked beside mana (which keeps its own, richer model) in fight.powers[token]:
+--   { spent, gained, castSpent, spells, gains, wasted, hidden, max, cappedTime, regenRate }
+-- spent/gained are measured from UNIT_POWER_FREQUENT deltas when the value is readable; if it's hidden
+-- (secret), spent falls back to listed ability costs (castSpent) and gained is unknown. gains holds logged
+-- energize sources (TBC combat log) and wasted their overflow past max. For energy, time spent at max
+-- (cappedTime) times the regen rate is the energy wasted by capping.
+
+local OTHER_POWERS = { RAGE = Enum.PowerType.Rage, ENERGY = Enum.PowerType.Energy }
+local POWER_TOKEN_BY_TYPE = {}
+for token, powerType in pairs(OTHER_POWERS) do POWER_TOKEN_BY_TYPE[powerType] = token end
+ns.OTHER_POWERS = OTHER_POWERS
+ns.POWER_TOKEN_BY_TYPE = POWER_TOKEN_BY_TYPE
+
+-- Listed rage/energy costs of a spell: token -> cost (only readable, positive costs).
+local function GetOtherPowerCosts(spellID)
+    local costs = {}
+    for _, powerCost in ipairs(C_Spell.GetSpellPowerCost(spellID) or {}) do
+        local token = IsReadable(powerCost.type) and POWER_TOKEN_BY_TYPE[powerCost.type]
+        if token and IsReadable(powerCost.cost) and powerCost.cost > 0 then
+            costs[token] = (costs[token] or 0) + powerCost.cost
+        end
+    end
+    return costs
+end
+
+local function ReadPower(token)
+    local value = UnitPower("player", OTHER_POWERS[token])
+    if IsReadable(value) then return value end
+end
+
+-- Starts or stops the at-max timer for energy (energy regen is wasted while capped).
+local function UpdateEnergyCap(entry, value, now)
+    local maxValue = UnitPowerMax("player", OTHER_POWERS.ENERGY)
+    if not IsReadable(maxValue) or maxValue <= 0 then return end
+    entry.max = maxValue
+    if value >= maxValue then
+        if not entry.capSince then
+            entry.capSince = now
+            -- The regen rate while capped, for the wasted estimate (energy's GetPowerRegen is per second).
+            local _, active = GetPowerRegen()
+            if IsReadable(active) and active > 0 then entry.regenRate = active end
+        end
+    elseif entry.capSince then
+        entry.cappedTime = entry.cappedTime + (now - entry.capSince)
+        entry.capSince = nil
+    end
+end
+
+-- The fight's entry for a power, created on first use (a druid's fight may gain rage or energy mid-fight).
+local function PowerEntry(fight, token)
+    fight.powers = fight.powers or {}
+    local entry = fight.powers[token]
+    if entry then return entry end
+    local maxValue = UnitPowerMax("player", OTHER_POWERS[token])
+    entry = { spent = 0, gained = 0, castSpent = 0, spells = {}, gains = {}, wasted = 0, cappedTime = 0,
+        max = IsReadable(maxValue) and maxValue or nil }
+    local value = ReadPower(token)
+    if value then
+        entry.last = value
+        if token == "ENERGY" then UpdateEnergyCap(entry, value, GetTime()) end
+    else
+        entry.hidden = true
+    end
+    fight.powers[token] = entry
+    return entry
+end
+ns.PowerEntry = PowerEntry
+
+-- An ability's rage/energy cost toward the fight, per spell like mana's spells.
+local function AddPowerCast(fight, token, spellID, cost)
+    local entry = PowerEntry(fight, token)
+    entry.castSpent = entry.castSpent + cost
+    local spell = entry.spells[spellID]
+    if not spell then
+        spell = { casts = 0, mana = 0, spellID = spellID, name = C_Spell.GetSpellName(spellID) or tostring(spellID),
+            rank = GetSpellRank(spellID) }
+        entry.spells[spellID] = spell
+    end
+    spell.casts = spell.casts + 1
+    spell.mana = spell.mana + cost -- "mana" is the shared amount field used by SortedEntries and the UI
+end
+
+-- Rage/energy that abilities and potions give (Charge, Bloodrage, Rage Potion, Thistle Tea, ...), estimated
+-- from the spell's English description like mana potions. Used where gains aren't logged (WoW Forever); on
+-- TBC the combat log measures them (ns.Mana.logsPowerGains). Rage from damage dealt and taken, and passive
+-- procs, can't be seen this way.
+-- Patterns are tried in order on the lower-cased description; the first match wins, and a Bloodrage-style
+-- "an additional N rage" is added on top.
+local POWER_GAIN_PATTERNS = {
+    { "RAGE", "rage by (%d+) to (%d+)" }, -- Rage Potion: "Increases Rage by 20 to 40."
+    { "RAGE", "rage by (%d+)" },
+    { "RAGE", "generat%a* (%d+) rage" }, -- Charge: "generate 9 rage"; Bloodrage: "Generates 10 rage"
+    { "RAGE", "gain (%d+) rage" },
+    { "ENERGY", "energy by (%d+) to (%d+)" },
+    { "ENERGY", "restores (%d+) energy" }, -- Thistle Tea: "Instantly restores 100 energy."
+    { "ENERGY", "energy by (%d+)" },
+    { "ENERGY", "generat%a* (%d+) energy" },
+    { "ENERGY", "gain (%d+) energy" },
+}
+-- Fallback when the description can't be read: spell ID -> { token, low, high }.
+local KNOWN_POWER_GAINS = {
+    [2687] = { "RAGE", 20, 20 }, -- Bloodrage: 10 at once, 10 more over 10 sec
+    [100] = { "RAGE", 9, 9 }, [6178] = { "RAGE", 12, 12 }, [11578] = { "RAGE", 15, 15 }, -- Charge ranks 1-3
+}
+local powerGainCache = {} -- spell ID -> { token, low, high } or false
+
+local function GetPowerGain(spellID)
+    local cached = powerGainCache[spellID]
+    if cached ~= nil then return cached or nil end
+    local description = C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(spellID)
+    if not IsReadable(description) or description == "" then
+        return KNOWN_POWER_GAINS[spellID] -- not loaded yet or hidden: don't cache, retry next cast
+    end
+    description = description:lower()
+    local gain
+    for _, pattern in ipairs(POWER_GAIN_PATTERNS) do
+        local low, high = description:match(pattern[2])
+        if low then
+            local token = pattern[1]
+            low, high = tonumber(low), tonumber(high or low)
+            local extra = tonumber(description:match("additional (%d+) " .. token:lower()))
+            if extra then low, high = low + extra, high + extra end
+            gain = { token, low, high }
+            break
+        end
+    end
+    gain = gain or KNOWN_POWER_GAINS[spellID] or false
+    powerGainCache[spellID] = gain
+    return gain or nil
+end
+
+-- Books an estimated rage/energy gain (average of the range) as a gain entry of the fight's power.
+local function AddPowerGain(fight, spellID, gain)
+    local token, low, high = gain[1], gain[2], gain[3]
+    local power = PowerEntry(fight, token)
+    local entry = power.gains[spellID]
+    if not entry then
+        entry = { casts = 0, mana = 0, spellID = spellID, estimated = true,
+            name = C_Spell.GetSpellName(spellID) or tostring(spellID),
+            rank = low == high and tostring(low) or (low .. "-" .. high) }
+        power.gains[spellID] = entry
+    end
+    entry.casts = entry.casts + 1
+    entry.mana = entry.mana + (low + high) / 2
+    Debug("estimated", token, "gain", entry.name, (low + high) / 2)
+end
+
+-- A rage/energy UNIT_POWER_FREQUENT during a fight: measure spent and gained from the change.
+local function OnOtherPowerChanged(token)
+    local fight = ns.current
+    if not fight then return end
+    local entry = PowerEntry(fight, token)
+    local value = ReadPower(token)
+    if not value then
+        entry.hidden = true
+        return
+    end
+    if entry.last then
+        local delta = value - entry.last
+        if delta < 0 then
+            entry.spent = entry.spent - delta
+        elseif delta > 0 then
+            entry.gained = entry.gained + delta
+        end
+    end
+    entry.last = value
+    if token == "ENERGY" then UpdateEnergyCap(entry, value, GetTime()) end
+end
+
+-- Closes a fight's rage/energy entries: hidden values fall back to listed costs, and energy's time at max
+-- becomes an estimate of energy wasted.
+local function FinishPowers(fight, now)
+    for token, entry in pairs(fight.powers or {}) do
+        if entry.capSince then
+            entry.cappedTime = entry.cappedTime + (now - entry.capSince)
+            entry.capSince = nil
+        end
+        if token == "ENERGY" and entry.regenRate and entry.cappedTime > 0 then
+            entry.wastedCap = entry.cappedTime * entry.regenRate
+        end
+        if entry.hidden then
+            entry.spent, entry.gained = entry.castSpent, nil
+        end
+        entry.last = nil
+    end
 end
 
 -- Mana per 5 seconds a buff gives, parsed from its English spell description, or nil. Recognises
@@ -310,6 +499,7 @@ local function OnCastSent(castGUID, spellID)
         mana = GetMana(), -- readable on TBC, nil on WoW Forever
         energize = energizeTotal,
         reducers = ScanAuras("HELPFUL", COST_REDUCER_SET, IsCostReducer),
+        otherCosts = GetOtherPowerCosts(spellID), -- rage/energy, read before the cast consumes any proc
     }
     castSnapshots[IsReadable(castGUID) and castGUID or spellID] = snap
     Debug("cast start", C_Spell.GetSpellName(spellID) or spellID, "cost", snap.cost,
@@ -440,6 +630,18 @@ function ns.LiveFightView()
         for key, value in pairs(data) do copy[key] = value end
         if data.since then copy.uptime = data.uptime + (now - data.since) end
         view.buffs[name] = copy
+    end
+    -- Rage/energy as they'd look finished: hidden values fall back to costs, time at max so far.
+    view.powers = {}
+    for token, entry in pairs(fight.powers or {}) do
+        local copy = {}
+        for key, value in pairs(entry) do copy[key] = value end
+        if entry.capSince then copy.cappedTime = entry.cappedTime + (now - entry.capSince) end
+        if token == "ENERGY" and copy.regenRate and copy.cappedTime > 0 then
+            copy.wastedCap = copy.cappedTime * copy.regenRate
+        end
+        if entry.hidden then copy.spent, copy.gained = entry.castSpent, nil end
+        view.powers[token] = copy
     end
     return view
 end
@@ -680,12 +882,16 @@ local function StartFight(encounterName)
     local maxMana = UnitPowerMax("player", MANA)
     Debug("fight start", encounterName or "Combat", "max mana", Describe(maxMana), "mana", Describe(UnitPower("player", MANA)),
         "target", Describe(UnitName("target")))
-    if not IsReadable(maxMana) or maxMana == 0 then return end
+    -- Characters without mana (warriors, rogues) have max mana 0; their fights are tracked for rage/energy.
+    if not IsReadable(maxMana) then return end
 
     local now = GetTime()
     local mana = GetMana()
     local targetName = GetHostileTargetName()
+    local _, powerToken = UnitPowerType("player")
     local fight = {
+        -- The power the character was using at the start ("MANA", "RAGE", "ENERGY"), shown by default.
+        primaryPower = IsReadable(powerToken) and powerToken or "MANA",
         name = encounterName or (arenaActive and ("Arena: " .. GetRealZoneText())) or targetName or "Combat",
         isEncounter = encounterName ~= nil,
         isArena = arenaActive or nil,
@@ -712,15 +918,26 @@ local function StartFight(encounterName)
     -- now (like out-of-combat regen) isn't counted toward this fight.
     ns.Mana.OnFightStart(fight, now)
     ns.current = fight
+    if OTHER_POWERS[fight.primaryPower] then
+        PowerEntry(fight, fight.primaryPower) -- start from the current rage/energy, before any change
+    end
     ShowDisplay()
 
     -- Pre-combat casts count toward the fight. Their mana was spent before combat's own mana tracking
     -- began, so add them to spent. The client file already saw them through OnManaSpend.
     for _, cast in ipairs(recentCasts) do
         if now - cast.time <= PRECOMBAT_WINDOW then
-            Debug("pre-combat cast", cast.spellID, "cost", cast.cost)
-            fight.spent = fight.spent + cast.cost
-            AddCast(fight, cast.spellID, cast.cost)
+            Debug("pre-combat cast", cast.spellID, cast.power or "MANA", "cost", cast.cost)
+            if cast.gain then
+                AddPowerGain(fight, cast.spellID, cast.gain) -- e.g. the Charge that started the fight
+            elseif cast.power then
+                AddPowerCast(fight, cast.power, cast.spellID, cast.cost)
+                local entry = fight.powers[cast.power]
+                if not entry.hidden then entry.spent = entry.spent + cast.cost end
+            else
+                fight.spent = fight.spent + cast.cost
+                AddCast(fight, cast.spellID, cast.cost)
+            end
         end
     end
 
@@ -785,6 +1002,7 @@ local function EndFight(success)
         fight.lowestMana = nil
     end
     fight.castSpent = nil
+    FinishPowers(fight, now)
     HideDisplayLater()
 
     local fights = ns.char.fights
@@ -862,6 +1080,29 @@ local function OnSpellCast(spellID, castGUID)
     local cost, snap, reducersAfter = PaidCost(castGUID, spellID)
     Debug("cast done ", C_Spell.GetSpellName(spellID) or spellID, "(spell " .. spellID .. ") paid", cost,
         "| reducer:", FirstReducer(reducersAfter) or "none")
+
+    -- Rage and energy costs, from cast start when there's a snapshot.
+    for token, powerCost in pairs(snap and snap.otherCosts or GetOtherPowerCosts(spellID)) do
+        if ns.current then
+            AddPowerCast(ns.current, token, spellID, powerCost)
+        else
+            -- e.g. a rogue's Sap before the pull: counted toward the fight that follows, like mana pull casts.
+            table.insert(recentCasts, { time = now, spellID = spellID, cost = powerCost, power = token })
+            while #recentCasts > 0 and now - recentCasts[1].time > PRECOMBAT_WINDOW do
+                table.remove(recentCasts, 1)
+            end
+        end
+    end
+    -- Rage/energy the cast gives (Charge, Bloodrage, potions), estimated where gains aren't logged.
+    local gain = not ns.Mana.logsPowerGains and GetPowerGain(spellID)
+    if gain then
+        if ns.current then
+            AddPowerGain(ns.current, spellID, gain)
+        else
+            -- A Charge usually lands just before combat starts; keep it for the fight that follows.
+            table.insert(recentCasts, { time = now, spellID = spellID, gain = gain })
+        end
+    end
     -- Record savings before the zero-cost check, so free casts (e.g. Elemental Mastery) still count.
     RecordSaving(ns.current, spellID, cost, snap, reducersAfter)
     if cost <= 0 then return end
@@ -965,6 +1206,8 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if powerType == "MANA" then
             UpdateManaBar()
             OnManaChanged()
+        elseif OTHER_POWERS[powerType] then
+            OnOtherPowerChanged(powerType)
         end
     elseif event == "UNIT_SPELLCAST_SENT" then
         local _, _, castGUID, spellID = ...
