@@ -140,6 +140,7 @@ local function ShowRowTooltip(row)
     GameTooltip:ClearLines()
     GameTooltip:AddLine(entry.name or "")
     if entry.rank then GameTooltip:AddLine(entry.rank, 1, 1, 1, true) end
+    if entry.description then GameTooltip:AddLine(entry.description, 0.8, 0.8, 0.8, true) end
     GameTooltip:Show()
 end
 

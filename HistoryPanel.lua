@@ -484,15 +484,21 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         local function Rate(regen, seconds)
             return seconds > 0 and string.format("%.1f/s", regen / seconds) or "no time"
         end
+        -- The row text leads with where the regen comes from; the tooltip explains the window.
         if casting >= 1 then
             table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, mana = casting,
-                rank = string.format("%s within the 5-second rule  ·  %s", FormatDuration(split.castingTime),
-                    Rate(split.castingRegen, split.castingTime)) })
+                rank = string.format("mp5 from gear and talents  ·  %s  ·  %s",
+                    Rate(split.castingRegen, split.castingTime), FormatDuration(split.castingTime)),
+                description = "Regen within 5 seconds of spending mana (the five-second rule). Spirit regen "
+                    .. "stops there; what's left is mp5 from gear and talents such as Arcane Meditation, "
+                    .. "at the rate the game reports." })
         end
         if full >= 1 then
             table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = full,
-                rank = string.format("%s outside the 5-second rule  ·  %s", FormatDuration(split.fullTime),
-                    Rate(split.fullRegen, split.fullTime)) })
+                rank = string.format("spirit and mp5  ·  %s  ·  %s",
+                    Rate(split.fullRegen, split.fullTime), FormatDuration(split.fullTime)),
+                description = "Regen more than 5 seconds after the last mana spend, at the full rate the game "
+                    .. "reports: spirit plus mp5 from gear and talents." })
         end
         if unaccounted >= 1 then
             table.insert(children, { name = "Unaccounted", icon = UNKNOWN_ICON, mana = unaccounted,
@@ -839,7 +845,8 @@ local function ShowSections(fight, power)
             row.icon:Show()
             row.iconButton.spellID = type(entry.spellID) == "number" and entry.spellID or nil
             row.iconButton.title = entry.name
-            row.iconButton.text = entry.rank
+            row.iconButton.text = entry.description and ((entry.rank and (entry.rank .. "\n\n") or "")
+                .. entry.description) or entry.rank
             row.iconButton:Show()
             row.casts:SetText(entry.casts or "")
             local fraction
