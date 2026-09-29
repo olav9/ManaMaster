@@ -48,17 +48,32 @@ end
 -- mana is wasted. During a fight the amounts are also booked to it: gained regen, wasted at full mana,
 -- or all of it as blocked while a regen-blocking debuff is up.
 -- Call before changing lastManaSpend, the pool or current.regenBlocked, so the interval uses the old state.
+-- Mana per second from the fight's tracked mp5 buffs that are up (e.g. Blessing of Wisdom). GetManaRegen
+-- leaves these out (seen in game: the same rates with and without Blessing of Wisdom; gear mp5 is included),
+-- and mp5 works within the five-second rule too, so it's added in both windows. Drinks are handled separately.
+local function BuffRegenRate(fight)
+    local rate = 0
+    for _, entry in pairs(fight and fight.buffs or {}) do
+        if entry.since and entry.mp5 and not entry.isDrink then rate = rate + entry.mp5 / 5 end
+    end
+    return rate
+end
+
 local function AdvancePool(now)
     local from = pool.clock
     pool.clock = now
     if not pool.mana or now <= from then return end
     local current = ns.current
 
-    if regenRates then
+    local buffRate = BuffRegenRate(current)
+    if regenRates or buffRate > 0 then
         local ruleEnd = lastManaSpend + FIVE_SECOND_RULE
         local activeTime = math.max(0, math.min(now, ruleEnd) - from)
         local inactiveTime = (now - from) - activeTime
-        local amount = activeTime * regenRates.active + inactiveTime * regenRates.inactive
+        local amount = (now - from) * buffRate
+        if regenRates then
+            amount = amount + activeTime * regenRates.active + inactiveTime * regenRates.inactive
+        end
 
         if current and current.regenBlocked then
             current.wastedBlocked = current.wastedBlocked + amount
@@ -253,7 +268,8 @@ function ns.Mana.OnFightStart(fight, now)
     fight.wastedFull = 0 -- regen lost to being at max mana
     fight.wastedBlocked = 0 -- regen lost to REGEN_BLOCKERS debuffs
     fight.regenBlocked = false
-    fight.regen = 0 -- estimated passive regen, from GetManaRegen and the five-second rule
+    fight.regen = 0 -- estimated passive regen, from GetManaRegen and the five-second rule, plus buff mp5
+    fight.buffRegenAdded = true -- buff mp5 is added on top of GetManaRegen's rates (the panel splits by this)
     fight.gains = {} -- estimated mana restores from potions, runes and gems, keyed by spell ID
 end
 
@@ -295,6 +311,8 @@ end
 
 -- Updates the regen-blocked state from REGEN_BLOCKERS debuffs.
 function ns.Mana.OnAuras(fight, now)
+    -- Settle regen under the current buffs before the core updates them (buff mp5 is part of the rate).
+    AdvancePool(now)
     local blockers = ns.ScanAuras("HARMFUL", REGEN_BLOCKERS) -- keep only the first return; the second is a count
     local blocked = next(blockers) ~= nil
 

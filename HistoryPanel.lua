@@ -149,7 +149,8 @@ local function CombineFights(fights)
         maxMana = 100, -- lowestMana below is a percentage, so the panel's lowest % works unchanged
     }
     local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
-        gainsMeasured = true, buffs = true, lowestMana = true, saved = true, regenSplit = true }
+        gainsMeasured = true, buffs = true, lowestMana = true, saved = true, regenSplit = true,
+        buffRegenAdded = true }
     local matchRefill = 0
     local zones, zoneList = {}, {}
 
@@ -233,6 +234,7 @@ local function CombineFights(fights)
         if not everyFight then combined[field] = nil end
     end
     combined.gainsMeasured = all.gainsMeasured or nil
+    combined.buffRegenAdded = all.buffRegenAdded or nil
     combined.matchRefill = matchRefill > 0 and matchRefill or nil
     combined.zone = table.concat(zoneList, ", ")
     for _, power in pairs(combined.powers or {}) do
@@ -454,14 +456,16 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
     local rest = passive - buffTotal
 
     -- Regen by the five-second rule, from the game's rates times the time spent in each window
-    -- (fight.regenSplit, from ManaMaster.lua). mp5 buffs apply in both windows, so their share (by time)
-    -- is taken out of each prediction first.
+    -- (fight.regenSplit, from ManaMaster.lua). mp5 buffs apply in both windows. Where the estimate adds buff
+    -- mp5 on top of the game's rates (fight.buffRegenAdded, WoW Forever: GetManaRegen leaves Blessing of Wisdom
+    -- out), the predictions are the rates alone. Otherwise the buffs' share (by time) is taken out of each.
     local split = fight.regenSplit
     local totalTime = split and (split.castingTime + split.fullTime) or 0
     local predCasting, predFull = 0, 0
     if totalTime > 0 then
-        predCasting = math.max(0, split.castingRegen - buffTotal * split.castingTime / totalTime)
-        predFull = math.max(0, split.fullRegen - buffTotal * split.fullTime / totalTime)
+        local buffShare = fight.buffRegenAdded and 0 or buffTotal
+        predCasting = math.max(0, split.castingRegen - buffShare * split.castingTime / totalTime)
+        predFull = math.max(0, split.fullRegen - buffShare * split.fullTime / totalTime)
     end
     local predicted = predCasting + predFull
     if rest >= 1 and predicted > 0 then
@@ -479,7 +483,8 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
             full, unaccounted = rest - casting, 0
         end
 
-        -- Average rates the game reported (including mp5 buffs), to compare with the character sheet.
+        -- Average rates the game reported (spirit and gear mp5; not Blessing of Wisdom), to compare with the
+        -- character sheet.
         local FormatDuration = ns.FormatDuration
         local function Rate(regen, seconds)
             return seconds > 0 and string.format("%.1f/s", regen / seconds) or "no time"
