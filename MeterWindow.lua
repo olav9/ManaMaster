@@ -141,6 +141,14 @@ local function GetRow(i)
     row:EnableMouse(true)
     row:SetScript("OnEnter", ShowRowTooltip)
     row:SetScript("OnLeave", GameTooltip_Hide)
+    -- Left-click opens the history panel on the fight the meter shows (the running one, or the last),
+    -- in the power of the meter's section (e.g. rage).
+    row:SetScript("OnMouseUp", function(_, button)
+        if button ~= "LeftButton" then return end
+        local fights = ns.char and ns.char.fights
+        local fight = ns.current or (fights and fights[#fights])
+        if fight then ns.OpenHistory({ fight }, SECTION_POWER[CurrentSection()]) end
+    end)
 
     row.icon = row:CreateTexture(nil, "ARTWORK")
     row.icon:SetSize(ICON_SIZE, ICON_SIZE)

@@ -1051,9 +1051,38 @@ end
 
 -- Selects the newest fight and scrolls both panes to the top. Used when the panel opens, and when a
 -- fight ends while it's open so the new segment is shown straight away. Does nothing while it's closed.
+-- Set by ns.OpenHistory: the fights (and power) to show when the panel opens, instead of the newest fight.
+local pendingFights, pendingPower
+
 function ns.ShowNewestFight()
     if not panel or not panel:IsShown() then return end
     local fights = ns.char.fights
+    if pendingFights then
+        -- Opened from a meter or Details bar: select that bar's fights (several for a Details segment that
+        -- spans more than one) and scroll the list so the newest of them is in view.
+        wipe(selected)
+        local newestRow
+        for _, fight in ipairs(pendingFights) do
+            selected[fight] = true
+            -- Rows: the running fight first, then saved fights newest first.
+            local row = fight == ns.current and 1
+                or (IndexOf(fight) and (#fights - IndexOf(fight) + 1 + (ns.current and 1 or 0)))
+            if row then newestRow = math.min(newestRow or row, row) end
+        end
+        selectionAnchor = pendingFights[#pendingFights]
+        selectedPower = pendingPower or selectedPower
+        pendingFights, pendingPower = nil, nil
+        if not next(selected) then SelectOnly(fights[#fights]) end
+        animateBars = true
+        listScroll:SetVerticalScroll(0)
+        detailScroll:SetVerticalScroll(0)
+        ns.RefreshHistory()
+        if newestRow then
+            local maxScroll = listScroll:GetVerticalScrollRange()
+            listScroll:SetVerticalScroll(math.min(maxScroll, (newestRow - 1) * (ROW_HEIGHT + ROW_GAP)))
+        end
+        return
+    end
     SelectOnly(fights[#fights])
     animateBars = true
     listScroll:SetVerticalScroll(0)
@@ -1315,4 +1344,17 @@ end
 function ns.ToggleHistory()
     if not panel then CreatePanel() end
     panel:SetShown(not panel:IsShown())
+end
+
+-- Opens the history panel (or keeps it open) with these fights selected and, if given, this power shown
+-- ("MANA", "RAGE", "ENERGY"). Used by left-clicking a bar in the meter window or the Details plugin.
+function ns.OpenHistory(fights, power)
+    if not fights or #fights == 0 then return end
+    if not panel then CreatePanel() end
+    pendingFights, pendingPower = fights, power
+    if panel:IsShown() then
+        ns.ShowNewestFight() -- applies the pending selection
+    else
+        panel:Show() -- OnShow runs ShowNewestFight, which applies it
+    end
 end

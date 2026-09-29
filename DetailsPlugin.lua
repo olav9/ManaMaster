@@ -191,6 +191,9 @@ local function BarColor(token)
     return BAR_R, BAR_G, BAR_B
 end
 
+-- The fights and power the window shows (set by Update), for opening the history panel on a click.
+local shownFights, shownPower
+
 local function NewRow(i)
     local row = Details.gump:NewBar(frame, nil, "DetailsManaMasterRow" .. i, nil, 300, 14)
     row.fontsize = 9.9
@@ -203,11 +206,34 @@ local function NewRow(i)
     row:SetHook("OnLeave", function(bar)
         if GameTooltip:IsOwned(bar) then GameTooltip:Hide() end
     end)
-    local bar = row.statusbar
-    if bar.SetMouseMotionEnabled then
-        bar:SetMouseMotionEnabled(true)
-        bar:SetMouseClickEnabled(false)
-    end
+    -- Clicks, handled like Details' own bars (lineScript_Onmousedown/up in Details' window_main.lua):
+    -- right-click opens Details' menu, a left press moves the window (unless locked), and a left click
+    -- without moving opens the history panel on this segment's fights. Returning true skips the bar's
+    -- default handling.
+    row:SetHook("OnMouseDown", function(_, button)
+        local inst = plugin:GetPluginInstance()
+        if button == "RightButton" then
+            if inst and Details.switch and Details.switch.ShowMe then Details.switch:ShowMe(inst) end
+        elseif button == "LeftButton" then
+            row.pressX, row.pressY = GetCursorPosition()
+            local startMove = inst and inst.baseframe:GetScript("OnMouseDown")
+            if startMove then startMove(inst.baseframe, "LeftButton") end
+        end
+        return true
+    end)
+    row:SetHook("OnMouseUp", function(_, button)
+        if button ~= "LeftButton" then return true end
+        local inst = plugin:GetPluginInstance()
+        local stopMove = inst and inst.baseframe:GetScript("OnMouseUp")
+        if stopMove then stopMove(inst.baseframe, "LeftButton") end
+        -- A click, not a drag: the cursor stayed within a few pixels of where it was pressed.
+        local x, y = GetCursorPosition()
+        if row.pressX and math.abs(x - row.pressX) < 5 and math.abs(y - row.pressY) < 5 then
+            ns.OpenHistory(shownFights, shownPower)
+        end
+        row.pressX, row.pressY = nil, nil
+        return true
+    end)
     row:Hide()
     plugin.Rows[i] = row
     return row
@@ -297,6 +323,7 @@ local function Update()
     local ok, fights = pcall(FightsForSegment)
     if not ok then fights = DefaultFights() end -- a Details version with different segment data
     local spells, power = MergedSpells(fights)
+    shownFights, shownPower = fights, power
     local barR, barG, barB = BarColor(power or "MANA")
     local total = 0
     for _, spell in ipairs(spells) do total = total + spell.mana end
