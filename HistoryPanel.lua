@@ -4,10 +4,10 @@ local _, ns = ...
 local PANEL_WIDTH, PANEL_HEIGHT = 680, 420 -- default size
 local MIN_WIDTH, MIN_HEIGHT = 560, 300
 local MAX_WIDTH, MAX_HEIGHT = 1600, 1200
-local LIST_SHARE = 0.4 -- share of the panel width given to the fight list...
--- ...within these limits. The list stops growing at 320 (an 800-wide panel); any width beyond that goes
+local LIST_SHARE = 0.3 -- share of the panel width given to the fight list...
+-- ...within these limits. The list stops growing at 240 (an 800-wide panel); any width beyond that goes
 -- to the details pane, which is where long spell names and labels need the room.
-local LIST_MIN_WIDTH, LIST_MAX_WIDTH = 240, 320
+local LIST_MIN_WIDTH, LIST_MAX_WIDTH = 200, 240
 local ROW_HEIGHT = 42
 local ROW_GAP = 2 -- space between fight rows
 local ROW_PAD_X = 12 -- inner padding of fight rows
@@ -257,13 +257,10 @@ local function GetRow(i)
     row.selected:SetAllPoints()
     row.selected:SetColorTexture(ACCENT_R, ACCENT_G, ACCENT_B, 0.3)
 
-    row.spent = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    row.spent:SetPoint("TOPRIGHT", -ROW_PAD_X, -ROW_PAD_Y)
-    row.spent:SetJustifyH("RIGHT")
-
+    -- Name and info only: the fight's numbers are in the details pane.
     row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     row.name:SetPoint("TOPLEFT", ROW_PAD_X, -ROW_PAD_Y)
-    row.name:SetPoint("RIGHT", row.spent, "LEFT", -10, 0)
+    row.name:SetPoint("TOPRIGHT", -ROW_PAD_X, -ROW_PAD_Y)
     row.name:SetJustifyH("LEFT")
     row.name:SetWordWrap(false)
 
@@ -559,13 +556,6 @@ local function ResolvePower(fight)
         if token == fight.primaryPower then return token end
     end
     return powers[1] or "MANA"
-end
-
--- The fight's spending in its main power, for the fight list: rage for a warrior rather than mana.
-local function PrimarySpent(fight)
-    local entry = fight.powers and fight.primaryPower and fight.powers[fight.primaryPower]
-    if entry then return entry.spent or entry.castSpent or 0 end
-    return fight.spent or 0
 end
 
 local function PowerColor(token)
@@ -1030,7 +1020,6 @@ function ns.RefreshHistory()
         local isLive = fight == ns.current
         local shown = isLive and live or fight
         row.name:SetText(shown.name .. (isLive and "  |cff40ff40in combat|r" or ResultText(shown)))
-        row.spent:SetText(ns.FormatNumber(PrimarySpent(shown)))
         row.info:SetText(string.format("%s  ·  %s  ·  %s", isLive and "Now" or date("%m/%d %H:%M", shown.date),
             ns.FormatDuration(shown.duration), shown.zone or ""))
         row.selected:SetShown(selected[fight] == true)
