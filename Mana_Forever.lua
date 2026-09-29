@@ -30,6 +30,9 @@ local lastManaSpend = 0 -- GetTime() of the last cast that cost mana, for the fi
 -- reading, or full mana detected from mana events going quiet.
 local pool = { mana = nil, max = 0, clock = 0, confirmed = false }
 local lastPowerEvent = 0 -- GetTime() of the last mana UNIT_POWER_FREQUENT, for detecting full mana
+-- The drink buff currently up, if any: { key, name, spellID, rate } with rate in mana per second.
+-- Updated on aura changes during a fight (e.g. drinking between arena bursts).
+local drink
 
 -- Keeps the last readable regen rates (mana per second), since they may be hidden in combat.
 local function ReadManaRegen()
@@ -48,22 +51,43 @@ end
 local function AdvancePool(now)
     local from = pool.clock
     pool.clock = now
-    if not pool.mana or not regenRates or now <= from then return end
-    local ruleEnd = lastManaSpend + FIVE_SECOND_RULE
-    local activeTime = math.max(0, math.min(now, ruleEnd) - from)
-    local inactiveTime = (now - from) - activeTime
-    local amount = activeTime * regenRates.active + inactiveTime * regenRates.inactive
-
+    if not pool.mana or now <= from then return end
     local current = ns.current
-    if current and current.regenBlocked then
-        current.wastedBlocked = current.wastedBlocked + amount
-        return
+
+    if regenRates then
+        local ruleEnd = lastManaSpend + FIVE_SECOND_RULE
+        local activeTime = math.max(0, math.min(now, ruleEnd) - from)
+        local inactiveTime = (now - from) - activeTime
+        local amount = activeTime * regenRates.active + inactiveTime * regenRates.inactive
+
+        if current and current.regenBlocked then
+            current.wastedBlocked = current.wastedBlocked + amount
+        else
+            local gained = math.min(amount, math.max(0, pool.max - pool.mana))
+            pool.mana = pool.mana + gained
+            if current then
+                current.wastedFull = current.wastedFull + (amount - gained)
+                current.regen = current.regen + gained
+            end
+        end
     end
-    local gained = math.min(amount, math.max(0, pool.max - pool.mana))
-    pool.mana = pool.mana + gained
-    if current then
-        current.wastedFull = current.wastedFull + (amount - gained)
-        current.regen = current.regen + gained
+
+    -- Drinking isn't part of GetManaRegen's rates, so it's added separately from the drink buff's
+    -- "N mana over M sec", and booked during a fight as an estimated "Drink" gain.
+    if drink then
+        local amount = drink.rate * (now - from)
+        local gained = math.min(amount, math.max(0, pool.max - pool.mana))
+        pool.mana = pool.mana + gained
+        if current and current.gains then
+            current.wastedFull = current.wastedFull + (amount - gained)
+            local entry = current.gains[drink.key]
+            if not entry then
+                -- periodic: the drink's whole restore is this row, so the passive-regen breakdown skips the buff.
+                entry = { casts = 0, mana = 0, spellID = drink.spellID, name = drink.name, periodic = true }
+                current.gains[drink.key] = entry
+            end
+            entry.mana = entry.mana + gained
+        end
     end
 end
 
@@ -228,6 +252,7 @@ end
 function ns.Mana.OnFightEnd(fight, now)
     AdvancePool(now)
     fight.regenBlocked = nil
+    drink = nil -- auras aren't tracked out of combat; full-mana detection catches drinking to full there
 end
 
 -- Potions, runes and gems: the actual gain is hidden, so add an estimate from the spell's description.
@@ -261,9 +286,32 @@ end
 function ns.Mana.OnAuras(fight, now)
     local blockers = ns.ScanAuras("HARMFUL", REGEN_BLOCKERS) -- keep only the first return; the second is a count
     local blocked = next(blockers) ~= nil
-    if blocked ~= fight.regenBlocked then
+
+    -- The drink buff, if one is up: description "N mana over M sec" (RegenMP5 flags it as a drink).
+    local newDrink
+    for name, info in pairs(ns.ScanAuras("HELPFUL", {}, ns.RegenMP5)) do
+        if info.isDrink and info.mp5 then
+            newDrink = { key = "drink:" .. (info.spellID or name), name = name, spellID = info.spellID,
+                rate = info.mp5 / 5 }
+            break
+        end
+    end
+
+    local drinkChanged = (drink and drink.key) ~= (newDrink and newDrink.key)
+    if blocked ~= fight.regenBlocked or drinkChanged then
         AdvancePool(now) -- close the interval under the old state first
         fight.regenBlocked = blocked
+        if drinkChanged then
+            drink = newDrink
+            if drink then
+                local entry = fight.gains[drink.key]
+                if entry then entry.casts = entry.casts + 1 else
+                    fight.gains[drink.key] = { casts = 1, mana = 0, spellID = drink.spellID, name = drink.name,
+                        periodic = true }
+                end
+                Debug("drinking", drink.name, "~" .. math.floor(drink.rate * 5 + 0.5), "mp5")
+            end
+        end
     end
 end
 

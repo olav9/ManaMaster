@@ -375,18 +375,21 @@ local function BuildSavedEntries(saved)
     return entries
 end
 
--- The Passive regen row plus indented rows for what makes it up, biggest first: each regen buff with a known
--- mana per 5 sec (estimated over its uptime), and the rest split into "Regen while casting" and "Full regen"
--- by the five-second rule (or one "Spirit and base regen" row for fights without that data). Buffs whose regen arrives as
--- logged periodic ticks (e.g. Mana Spring on TBC) already have their own gain row, so they're left out;
--- one-off logged gains (e.g. Water Shield orbs) don't cover a buff's passive mp5, so those buffs stay in.
--- The buff estimates ignore regen lost at full mana, so if they add up to more than the total they're
--- scaled down to fit, keeping the children equal to the parent.
+-- Passive regen broken into Mana gained rows of their own: each regen buff with a known mana per 5 sec
+-- (estimated over its uptime, marked "passive"), and the rest split into "Regen while casting" and "Full regen"
+-- by the five-second rule (or "Spirit and base regen" for fights without that data). With nothing to break it
+-- into, it's one "Passive regen" row. Buffs whose regen arrives as logged periodic ticks (e.g. Mana Spring on
+-- TBC) already have their own gain row, so they're left out; one-off logged gains (e.g. Water Shield orbs)
+-- don't cover a buff's passive mp5, so those buffs stay in. The buff estimates ignore regen lost at full
+-- mana, so if they add up to more than the passive total they're scaled down, keeping the parts equal to it.
 local function PassiveRegenGroup(fight, passive, passiveRank)
     local coveredByTicks = {}
-    for _, entry in pairs(fight.gainsMeasured and fight.gains or {}) do
-        -- nil means a fight saved before ticks were told apart; treat it as covered to avoid double counting.
-        if entry.periodic ~= false then coveredByTicks[entry.name] = true end
+    for _, entry in pairs(fight.gains or {}) do
+        -- periodic: logged ticks (TBC) or the Forever drink estimate. On TBC, nil means a fight saved before
+        -- ticks were told apart; treat it as covered to avoid double counting.
+        if entry.periodic == true or (fight.gainsMeasured and entry.periodic == nil) then
+            coveredByTicks[entry.name] = true
+        end
     end
 
     local children, estimated = {}, 0
@@ -731,7 +734,7 @@ local function ShowDetail(fight)
         -- Mana was hidden: spent is from spell costs, regen and potions are estimated.
         local restored = ns.RestoredTotal(fight)
         local net = fight.regen + restored - fight.spent
-        local restoredText = restored > 0 and ("   Potions ~" .. FormatNumber(restored)) or ""
+        local restoredText = restored > 0 and ("   Potions/drinks ~" .. FormatNumber(restored)) or ""
         detail.stats:SetText(string.format("Spent %s   Regen ~%s%s   Net %s%s\n|cff888888Spent from spell costs, regen and potions estimated|r",
             FormatNumber(fight.spent), FormatNumber(fight.regen), restoredText,
             net >= 0 and "+" or "-", FormatNumber(math.abs(net))))

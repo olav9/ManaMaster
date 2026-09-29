@@ -36,6 +36,11 @@ local REGEN_BUFFS = {
     ["Replenishment"] = true,
     ["Aspect of the Viper"] = true,
     ["Mana Regeneration"] = true, -- Mageblood Potion, Nightfin Soup and similar consumables
+    -- Drinking, e.g. between arena fights. Descriptions like "Restores 4410 mana over 30 sec" are also
+    -- detected by RegenMP5; the names are a fallback if the description can't be read.
+    ["Drink"] = true,
+    ["Food & Drink"] = true,
+    ["Refreshment"] = true,
 }
 
 local defaults = {
@@ -145,30 +150,40 @@ local function GetManaCost(spellID)
 end
 
 -- Mana per 5 seconds a buff gives, parsed from its English spell description, or nil. Recognises
--- "N mana per M sec" and "N mana every M sec" (e.g. "15 mana per 5 sec", "Gain 20 mana every 2 seconds"). This lets set bonuses,
--- trinket procs and consumables count as regen buffs without being listed in REGEN_BUFFS.
+-- "N mana per M sec" and "N mana every M sec" (e.g. "15 mana per 5 sec", "Gain 20 mana every 2 seconds"),
+-- and drinks: "N mana over M sec" (e.g. "Restores 4410 mana over 30 sec"). This lets set bonuses, trinket
+-- procs, consumables and drinks count as regen buffs without being listed in REGEN_BUFFS.
+-- Also returns whether it's a drink ("over"): drinking isn't part of GetManaRegen's rates.
 -- Cached per spell ID; an empty or unreadable description isn't cached, so a later scan can retry.
 local regenMP5Cache = {}
 
 local function RegenMP5(spellID)
     local cached = regenMP5Cache[spellID]
-    if cached ~= nil then return cached or nil end
+    if cached ~= nil then
+        if not cached then return nil end
+        return cached.mp5, cached.isDrink
+    end
     local description = C_Spell.GetSpellDescription and C_Spell.GetSpellDescription(spellID)
     if not IsReadable(description) or description == "" then return nil end
 
     description = description:lower()
-    -- "N mana every/per M sec", with or without "restores"/"gain" in front, scaled to 5 seconds.
-    local mp5
+    -- "N mana every/per/over M sec", with or without "restores"/"gain" in front, scaled to 5 seconds.
+    local mp5, isDrink
     local amount, seconds = description:match("(%d+) mana every (%d+) sec")
     if not amount then
         amount, seconds = description:match("(%d+) mana per (%d+) sec")
     end
+    if not amount then
+        amount, seconds = description:match("(%d+) mana over (%d+) sec")
+        isDrink = amount ~= nil
+    end
     if amount and tonumber(seconds) > 0 then
         mp5 = tonumber(amount) * 5 / tonumber(seconds)
     end
-    regenMP5Cache[spellID] = mp5 or false
-    return mp5
+    regenMP5Cache[spellID] = mp5 and { mp5 = mp5, isDrink = isDrink } or false
+    return mp5, isDrink
 end
+ns.RegenMP5 = RegenMP5
 
 -- Returns the player's auras (filter "HELPFUL" or "HARMFUL") whose names are in `names`, as
 -- name -> { spellID, icon, mp5 }, plus how many auras couldn't be read. With `detect` (a function of the
@@ -186,7 +201,10 @@ local function ScanAuras(filter, names, detect)
         else
             local name = aura.name
             local spellID = IsReadable(aura.spellId) and aura.spellId or nil
-            local detected = detect and spellID and detect(spellID, aura)
+            local detected, isDrink
+            if detect and spellID then
+                detected, isDrink = detect(spellID, aura)
+            end
             if not IsReadable(name) then
                 hidden = hidden + 1
             elseif names[name] or detected then
@@ -194,6 +212,7 @@ local function ScanAuras(filter, names, detect)
                     spellID = spellID,
                     icon = IsReadable(aura.icon) and aura.icon or nil,
                     mp5 = type(detected) == "number" and detected or nil,
+                    isDrink = isDrink or nil,
                 }
             end
         end
@@ -488,7 +507,7 @@ local function PrintSummary(fight)
         -- Mana was hidden: spent is from spell costs, regen and potions are estimated.
         local restored = RestoredTotal(fight)
         local net = fight.regen + restored - fight.spent
-        local restoredText = restored > 0 and (" | Potions ~" .. FormatNumber(restored)) or ""
+        local restoredText = restored > 0 and (" | Potions/drinks ~" .. FormatNumber(restored)) or ""
         print(string.format("  Spent %s | Regen ~%s%s (est.) | Net %s%s",
             FormatNumber(fight.spent), FormatNumber(fight.regen), restoredText,
             net >= 0 and "+" or "-", FormatNumber(math.abs(net))))
@@ -566,6 +585,7 @@ local function UpdateAuras(fight, now)
             fight.buffs[name] = entry
         end
         entry.mp5 = entry.mp5 or info.mp5
+        entry.isDrink = entry.isDrink or info.isDrink
         entry.since = entry.since or now
     end
     for name, entry in pairs(fight.buffs) do
