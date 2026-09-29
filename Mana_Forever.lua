@@ -66,7 +66,11 @@ local function AdvancePool(now)
             local gained = math.min(amount, math.max(0, pool.max - pool.mana))
             pool.mana = pool.mana + gained
             if current then
-                current.wastedFull = current.wastedFull + (amount - gained)
+                -- Regen lost at full mana only counts once the fight has spent mana: being full while the
+                -- pull cast is still casting is unavoidable, not waste.
+                if current.manaSpentInFight then
+                    current.wastedFull = current.wastedFull + (amount - gained)
+                end
                 current.regen = current.regen + gained
             end
         end
@@ -257,6 +261,7 @@ end
 function ns.Mana.OnFightEnd(fight, now)
     AdvancePool(now)
     fight.regenBlocked = nil
+    fight.manaSpentInFight = nil -- only needed while the fight runs
     drink = nil -- auras aren't tracked out of combat; full-mana detection catches drinking to full there
 end
 
@@ -272,6 +277,7 @@ end
 function ns.Mana.OnManaSpend(cost, now)
     AdvancePool(now)
     lastManaSpend = now
+    if ns.current then ns.current.manaSpentInFight = true end
     if pool.mana then
         pool.mana = math.max(0, pool.mana - cost)
     end
