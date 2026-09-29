@@ -222,24 +222,29 @@ end
 
 -- Called before the fight becomes current, so regen settled up to now isn't booked to it.
 function ns.Mana.OnFightStart(fight, now)
-    ReadManaRegen()
-    Debug("regen per second", regenRates and regenRates.inactive or "unknown", "while casting",
-        regenRates and regenRates.active or "unknown")
-
-    -- Starting mana comes from the running pool estimate, brought up to date with out-of-combat regen.
-    -- If nothing has anchored it since login/reload, it's still the initial "assume full".
-    if not pool.mana then InitPool() end
-    pool.max = fight.maxMana
-    local mana = ns.GetMana()
-    if mana then
-        AnchorPool(mana, "readable at fight start")
+    if fight.maxMana <= 0 then
+        -- No mana (warrior, rogue): nothing to estimate. Mana reads as a plain 0 for them, so skip the pool.
+        fight.startMana = 0
     else
-        AdvancePool(now)
+        ReadManaRegen()
+        Debug("regen per second", regenRates and regenRates.inactive or "unknown", "while casting",
+            regenRates and regenRates.active or "unknown")
+
+        -- Starting mana comes from the running pool estimate, brought up to date with out-of-combat regen.
+        -- If nothing has anchored it since login/reload, it's still the initial "assume full".
+        if not pool.mana then InitPool() end
+        pool.max = fight.maxMana
+        local mana = ns.GetMana()
+        if mana then
+            AnchorPool(mana, "readable at fight start")
+        else
+            AdvancePool(now)
+        end
+        fight.startMana = math.min(pool.mana or fight.maxMana, fight.maxMana)
+        fight.startManaAssumed = not pool.confirmed or nil
+        Debug("start mana", math.floor(fight.startMana + 0.5),
+            fight.startManaAssumed and "(assumed full, never anchored)" or "(estimated)")
     end
-    fight.startMana = math.min(pool.mana or fight.maxMana, fight.maxMana)
-    fight.startManaAssumed = not pool.confirmed or nil
-    Debug("start mana", math.floor(fight.startMana + 0.5),
-        fight.startManaAssumed and "(assumed full, never anchored)" or "(estimated)")
 
     fight.wastedFull = 0 -- regen lost to being at max mana
     fight.wastedBlocked = 0 -- regen lost to REGEN_BLOCKERS debuffs

@@ -328,6 +328,10 @@ local function OnOtherPowerChanged(token)
     local entry = PowerEntry(fight, token)
     local value = ReadPower(token)
     if not value then
+        if not entry.hiddenLogged then
+            Debug(token, "is hidden: spent comes from listed costs, gains only from known sources")
+            entry.hiddenLogged = true
+        end
         entry.hidden = true
         return
     end
@@ -335,8 +339,11 @@ local function OnOtherPowerChanged(token)
         local delta = value - entry.last
         if delta < 0 then
             entry.spent = entry.spent - delta
+            Debug(token, delta, "to", value)
         elseif delta > 0 then
             entry.gained = entry.gained + delta
+            -- Energy regenerates continuously, so only log jumps (e.g. Thistle Tea); every rage gain is a hit.
+            if token == "RAGE" or delta >= 20 then Debug(token, "+" .. delta, "to", value) end
         end
     end
     entry.last = value
@@ -357,7 +364,12 @@ local function FinishPowers(fight, now)
         if entry.hidden then
             entry.spent, entry.gained = entry.castSpent, nil
         end
-        entry.last = nil
+        local known = 0
+        for _, gain in pairs(entry.gains) do known = known + gain.mana end
+        Debug("fight end", token, "spent", entry.spent, entry.hidden and "(listed costs)" or "(measured)",
+            "| gained", entry.gained or "hidden", "| known sources", known,
+            entry.wastedCap and ("| wasted at max ~" .. math.floor(entry.wastedCap + 0.5)) or "")
+        entry.last, entry.hiddenLogged = nil, nil
     end
 end
 
@@ -506,6 +518,26 @@ local REDUCER_TALENTS = {
     [16870] = "Omen of Clarity", -- druid
 }
 
+-- Whether the player has mana; warriors and rogues have max mana 0, so debug output leaves mana out.
+local function HasMana()
+    local maxMana = UnitPowerMax("player", MANA)
+    return IsReadable(maxMana) and maxMana > 0
+end
+
+-- Debug text for a cast's rage/energy costs and the player's current rage/energy (SECRET where hidden),
+-- e.g. "rage cost 15 | rage SECRET". Empty for casters without rage or energy.
+local function OtherPowerDebugText(otherCosts)
+    local parts = {}
+    for token, cost in pairs(otherCosts or {}) do
+        table.insert(parts, token:lower() .. " cost " .. cost)
+    end
+    local _, primary = UnitPowerType("player")
+    if IsReadable(primary) and OTHER_POWERS[primary] then
+        table.insert(parts, primary:lower() .. " " .. Describe(UnitPower("player", OTHER_POWERS[primary])))
+    end
+    return table.concat(parts, " | ")
+end
+
 local function OnCastSent(castGUID, spellID)
     local now = GetTime()
     for key, snap in pairs(castSnapshots) do
@@ -520,8 +552,16 @@ local function OnCastSent(castGUID, spellID)
         otherCosts = GetOtherPowerCosts(spellID), -- rage/energy, read before the cast consumes any proc
     }
     castSnapshots[IsReadable(castGUID) and castGUID or spellID] = snap
-    Debug("cast start", C_Spell.GetSpellName(spellID) or spellID, "cost", snap.cost,
-        "| reducer:", FirstReducer(snap.reducers) or "none", "| mana", Describe(snap.mana))
+    if ns.debugMode then
+        local parts = {}
+        if HasMana() then
+            table.insert(parts, "mana cost " .. tostring(snap.cost) .. " | mana " .. Describe(snap.mana)
+                .. " | reducer: " .. (FirstReducer(snap.reducers) or "none"))
+        end
+        local other = OtherPowerDebugText(snap.otherCosts)
+        if other ~= "" then table.insert(parts, other) end
+        Debug("cast start", C_Spell.GetSpellName(spellID) or spellID, table.concat(parts, " | "))
+    end
 end
 
 -- The mana a finished cast actually cost, and the reducer buffs up when it finished.
@@ -898,8 +938,14 @@ local function StartFight(encounterName)
     if not ns.db.enabled then return end
 
     local maxMana = UnitPowerMax("player", MANA)
-    Debug("fight start", encounterName or "Combat", "max mana", Describe(maxMana), "mana", Describe(UnitPower("player", MANA)),
-        "target", Describe(UnitName("target")))
+    if ns.debugMode then
+        local _, primary = UnitPowerType("player")
+        local powerText = IsReadable(primary) and OTHER_POWERS[primary]
+            and (primary:lower() .. " " .. Describe(UnitPower("player", OTHER_POWERS[primary]))
+                .. " of " .. Describe(UnitPowerMax("player", OTHER_POWERS[primary])))
+            or ("mana " .. Describe(UnitPower("player", MANA)) .. " of " .. Describe(maxMana))
+        Debug("fight start", encounterName or "Combat", powerText, "target", Describe(UnitName("target")))
+    end
     -- Characters without mana (warriors, rogues) have max mana 0; their fights are tracked for rage/energy.
     if not IsReadable(maxMana) then return end
 
@@ -945,7 +991,9 @@ local function StartFight(encounterName)
     -- began, so add them to spent. The client file already saw them through OnManaSpend.
     for _, cast in ipairs(recentCasts) do
         if now - cast.time <= PRECOMBAT_WINDOW then
-            Debug("pre-combat cast", cast.spellID, cast.power or "MANA", "cost", cast.cost)
+            if not cast.gain then
+                Debug("pre-combat cast", cast.spellID, cast.power or "MANA", "cost", cast.cost)
+            end
             if cast.gain then
                 AddPowerGain(fight, cast.spellID, cast.gain) -- e.g. the Charge that started the fight
             elseif cast.power then
@@ -1030,7 +1078,7 @@ local function EndFight(success)
     end
 
     -- The end-of-fight chat summary is debug output; /mm last still prints it on request.
-    if ns.debugMode then
+    if ns.debugMode and (fight.maxMana or 0) > 0 then -- mana summary; rage/energy are logged by FinishPowers
         PrintSummary(fight)
     end
     ns.ShowNewestFight() -- if the history panel is open, switch it to the fight that just ended
@@ -1096,11 +1144,21 @@ local function OnSpellCast(spellID, castGUID)
 
     -- What the cast actually cost; the cost listed after the cast already reflects procs from it.
     local cost, snap, reducersAfter = PaidCost(castGUID, spellID)
-    Debug("cast done ", C_Spell.GetSpellName(spellID) or spellID, "(spell " .. spellID .. ") paid", cost,
-        "| reducer:", FirstReducer(reducersAfter) or "none")
-
     -- Rage and energy costs, from cast start when there's a snapshot.
-    for token, powerCost in pairs(snap and snap.otherCosts or GetOtherPowerCosts(spellID)) do
+    local otherCosts = snap and snap.otherCosts or GetOtherPowerCosts(spellID)
+    if ns.debugMode then
+        local parts = {}
+        if HasMana() then
+            table.insert(parts, "paid " .. tostring(cost) .. " mana | reducer: "
+                .. (FirstReducer(reducersAfter) or "none"))
+        end
+        local other = OtherPowerDebugText(otherCosts)
+        if other ~= "" then table.insert(parts, other) end
+        Debug("cast done ", C_Spell.GetSpellName(spellID) or spellID, "(spell " .. spellID .. ")",
+            table.concat(parts, " | "), ns.current and "" or "(before combat)")
+    end
+
+    for token, powerCost in pairs(otherCosts) do
         if ns.current then
             AddPowerCast(ns.current, token, spellID, powerCost)
         else
