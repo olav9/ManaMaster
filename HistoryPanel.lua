@@ -3,6 +3,7 @@ local _, ns = ...
 -- The panel is resizable; its size is saved in ManaMasterDB.panelWidth/panelHeight.
 local PANEL_WIDTH, PANEL_HEIGHT = 680, 420 -- default size
 local MIN_WIDTH, MIN_HEIGHT = 560, 300
+local PANEL_BACKGROUND_ALPHA = 0.6 -- flat black, see-through (the meter window uses 0.7)
 local MAX_WIDTH, MAX_HEIGHT = 1600, 1200
 local LIST_SHARE = 0.3 -- share of the panel width given to the fight list...
 -- ...within these limits. The list stops growing at 240 (an 800-wide panel); any width beyond that goes
@@ -954,63 +955,40 @@ local function ShowSections(fight, power)
 end
 
 local function ShowDetail(fight)
-    local FormatNumber = ns.FormatNumber
-
     if not fight then
         detail.powerButton:Hide()
         detail.title:SetText("No fights recorded yet.")
         detail.info:SetText("")
-        detail.stats:SetText("")
         detail.sections:Hide()
         detailContent:SetHeight(1)
         return
     end
 
+    local power = ResolvePower(fight)
+
+    -- The info line: date, duration, zone, and for a single mana fight its start mana. Spent and gained
+    -- totals are in the section headers below, so there's no separate summary line.
+    local parts
     if fight.isCombined then
         detail.title:SetText(fight.name .. " |cff999999combined|r")
-        detail.info:SetText(string.format("%s – %s  ·  %s total  ·  %s",
-            date("%m/%d %H:%M", fight.date), date("%m/%d %H:%M", fight.lastDate),
-            ns.FormatDuration(fight.duration), fight.zone))
+        parts = { string.format("%s – %s", date("%m/%d %H:%M", fight.date), date("%m/%d %H:%M", fight.lastDate)),
+            ns.FormatDuration(fight.duration) .. " total", fight.zone }
     else
         detail.title:SetText(fight.name .. (fight.isLive and "  |cff40ff40in combat|r" or ResultText(fight)))
-        detail.info:SetText(string.format("%s  ·  %s  ·  %s",
-            date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
-    end
-
-    -- One summary line: Spent, Regen and Start mana. The breakdowns (net, potions, estimates) are in the
-    -- sections below. Regen is the measured recovery where mana was readable (TBC), otherwise the estimate.
-    -- Rage and energy: spent and gained, or only spent where the value is hidden.
-    local power = ResolvePower(fight)
-    local parts = { "Spent " .. FormatNumber(fight.spent) }
-    if power ~= "MANA" then
-        local entry = fight.powers and fight.powers[power]
-        parts = { "Spent " .. FormatNumber(entry and (entry.spent or entry.castSpent) or 0) }
-        local verb = power == "RAGE" and "Generated " or "Gained "
-        if entry and entry.gained then
-            table.insert(parts, verb .. FormatNumber(entry.gained))
-        elseif entry and next(entry.gains or {}) then
-            -- Hidden: only the estimated known sources (Charge, Bloodrage, potions).
-            local known = 0
-            for _, gain in pairs(entry.gains) do known = known + (gain.mana or 0) end
-            table.insert(parts, verb .. "~" .. FormatNumber(known) .. " from known sources")
-        end
-    elseif fight.recovered then
-        table.insert(parts, "Regen " .. FormatNumber(fight.recovered))
-    elseif fight.regen then
-        table.insert(parts, "Regen ~" .. FormatNumber(fight.regen))
+        parts = { date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or "" }
     end
     -- Combined fights have no single start mana; fights saved before it was tracked have none either.
     if power == "MANA" and fight.startMana and fight.maxMana and fight.maxMana > 0 and not fight.isCombined then
         local pct = fight.startMana / fight.maxMana * 100 + 0.5
         if fight.startManaAssumed then
-            table.insert(parts, "Start mana assumed full")
+            table.insert(parts, "start mana assumed full")
         elseif fight.gainsMeasured then
-            table.insert(parts, string.format("Start mana %d%%", pct)) -- TBC: read directly
+            table.insert(parts, string.format("start mana %d%%", pct)) -- TBC: read directly
         else
-            table.insert(parts, string.format("Start mana ~%d%% (est.)", pct))
+            table.insert(parts, string.format("start mana ~%d%%", pct)) -- WoW Forever: estimated
         end
     end
-    detail.stats:SetText(table.concat(parts, "   "))
+    detail.info:SetText(table.concat(parts, "  ·  "))
 
     detail.sections:Show()
     -- The power button cycles through the fight's powers; it's only shown when there's more than one.
@@ -1027,8 +1005,7 @@ local function ShowDetail(fight)
 
     local sectionsHeight = ShowSections(fight, power)
 
-    local height = detail.title:GetStringHeight() + 4 + detail.info:GetStringHeight() + 8
-        + detail.stats:GetStringHeight() + 14 + sectionsHeight
+    local height = detail.title:GetStringHeight() + 4 + detail.info:GetStringHeight() + 14 + sectionsHeight
     detailContent:SetHeight(height)
 end
 
@@ -1217,6 +1194,18 @@ local function CreatePanel()
     panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
     panel:Hide()
     panel.TitleText:SetText("ManaMaster - Fight History - " .. (ns.charName or "")) -- fights are per character
+
+    -- A see-through background instead of the template's opaque stone, so the world stays visible behind the
+    -- panel (it's big). The template's background textures sit in the BACKGROUND layer; its borders and title
+    -- bar don't, so they stay.
+    for _, region in ipairs({ panel:GetRegions() }) do
+        if region:GetObjectType() == "Texture" and region:GetDrawLayer() == "BACKGROUND" then region:Hide() end
+    end
+    if panel.InsetBg then panel.InsetBg:Hide() end
+    local background = panel:CreateTexture(nil, "BACKGROUND", nil, -8)
+    background:SetPoint("TOPLEFT", 2, -2)
+    background:SetPoint("BOTTOMRIGHT", -2, 2)
+    background:SetColorTexture(0, 0, 0, PANEL_BACKGROUND_ALPHA)
     tinsert(UISpecialFrames, panel:GetName()) -- close with Escape
 
     -- Widths are set by UpdateLayout once everything exists.
@@ -1262,15 +1251,10 @@ local function CreatePanel()
     detail.info:SetPoint("TOPRIGHT", detail.title, "BOTTOMRIGHT", 0, -4)
     detail.info:SetJustifyH("LEFT")
 
-    detail.stats = detailContent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    detail.stats:SetPoint("TOPLEFT", detail.info, "BOTTOMLEFT", 0, -8)
-    detail.stats:SetPoint("TOPRIGHT", detail.info, "BOTTOMRIGHT", 0, -8)
-    detail.stats:SetJustifyH("LEFT")
-
     -- Section headings and entry rows are laid out inside this frame, top to bottom.
     detail.sections = CreateFrame("Frame", nil, detailContent)
     detail.sections:SetHeight(1)
-    detail.sections:SetPoint("TOPLEFT", detail.stats, "BOTTOMLEFT", 0, -14)
+    detail.sections:SetPoint("TOPLEFT", detail.info, "BOTTOMLEFT", 0, -14)
 
     clearButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     clearButton:SetSize(120, 22)
