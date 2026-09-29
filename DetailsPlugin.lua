@@ -27,6 +27,13 @@ local instance -- the Details window the plugin is shown in
 -- The Details window whose segment was changed most recently (this one or another), so choosing a segment in
 -- e.g. the main damage window also switches this plugin. nil means follow the plugin's own window.
 local followInstance
+-- True from the moment a fight starts until a segment is chosen or the fight ends: show the live fight, the
+-- way Details jumps to the current segment when combat starts (even if this window wasn't on it).
+local liveOverride = false
+
+table.insert(ns.fightStartListeners, function()
+    liveOverride = true
+end)
 local ticker
 
 local MATCH_TOLERANCE = 2 -- seconds of slack when matching fight times to a Details segment
@@ -66,6 +73,10 @@ end
 -- segment spans everything since its last reset, so it matches every fight in that time. Falls back to
 -- DefaultFights when the segment has no usable times (e.g. Details built on Blizzard's meter).
 local function FightsForSegment()
+    if liveOverride then
+        if ns.current then return { ns.current } end
+        liveOverride = false -- the fight ended: go back to the followed segment (now the finished fight)
+    end
     local inst = followInstance or instance or plugin:GetPluginInstance()
     local combat = inst and inst.GetShowingCombat and inst:GetShowingCombat()
     if not combat or type(combat.GetStartTime) ~= "function" then return DefaultFights() end
@@ -251,6 +262,7 @@ function plugin:OnDetailsEvent(event, ...)
         local changedInstance = ...
         if changedInstance then
             followInstance = changedInstance ~= instance and changedInstance or nil
+            liveOverride = false -- a segment the player chose wins over the live fight
             Update()
         end
     elseif event == "HIDE" then

@@ -416,6 +416,34 @@ ns.FormatNumber = FormatNumber
 ns.FormatDuration = FormatDuration
 ns.SortedEntries = SortedEntries
 
+-- Functions called with the new fight when one starts (the history panel and Details plugin use this to
+-- switch to the live fight).
+ns.fightStartListeners = {}
+
+-- The running fight as a finished-fight-shaped copy, for showing live: duration so far, buff uptime
+-- including buffs still up, and spent from spell costs when mana is hidden (as EndFight would set).
+-- Tables like spells are shared, not copied, so the view stays cheap; don't modify it.
+function ns.LiveFightView()
+    local fight = ns.current
+    if not fight then return end
+    local now = GetTime()
+    local view = {}
+    for key, value in pairs(fight) do view[key] = value end
+    view.duration = now - fight.startClock
+    view.isLive = true
+    if fight.manaHidden then
+        view.spent, view.recovered, view.lowestMana = fight.castSpent, nil, nil
+    end
+    view.buffs = {}
+    for name, data in pairs(fight.buffs or {}) do
+        local copy = {}
+        for key, value in pairs(data) do copy[key] = value end
+        if data.since then copy.uptime = data.uptime + (now - data.since) end
+        view.buffs[name] = copy
+    end
+    return view
+end
+
 local DISPLAY_LINGER = 5 -- seconds the final number stays up after a fight
 
 local display = CreateFrame("Frame", nil, UIParent)
@@ -706,6 +734,10 @@ local function StartFight(encounterName)
     wipe(recentCasts)
     if not fight.manaHidden then
         UpdateDisplay(fight.spent)
+    end
+
+    for _, listener in ipairs(ns.fightStartListeners) do
+        listener(fight)
     end
 end
 

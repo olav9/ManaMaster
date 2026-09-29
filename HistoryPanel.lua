@@ -35,6 +35,7 @@ local SECTION_HEADER_HEIGHT = 18
 local SECTION_GAP = 12 -- space above each section after the first
 
 local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete buttons
+local LIVE_REFRESH_INTERVAL = 1 -- seconds between refreshes while in combat with the panel open
 
 local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton, selectAllButton
 local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
@@ -61,10 +62,15 @@ local function IndexOf(fight)
 end
 
 -- Selected fights in history order (oldest first).
-local function SelectedFights()
+-- The running fight (ns.current) is listed at the top of the panel and can be selected too; it comes last
+-- here, being the newest. includeCurrent = false leaves it out (e.g. for deleting).
+local function SelectedFights(includeCurrent)
     local list = {}
     for _, fight in ipairs(ns.char.fights) do
         if selected[fight] then table.insert(list, fight) end
+    end
+    if includeCurrent ~= false and ns.current and selected[ns.current] then
+        table.insert(list, ns.current)
     end
     return list
 end
@@ -76,7 +82,8 @@ local function SelectOnly(fight)
 end
 
 local function OnRowClick(fight)
-    if IsShiftKeyDown() and selectionAnchor and IndexOf(selectionAnchor) then
+    -- Shift ranges only cover saved fights; for the running fight Shift acts like a plain click.
+    if IsShiftKeyDown() and selectionAnchor and IndexOf(selectionAnchor) and IndexOf(fight) then
         local from, to = IndexOf(selectionAnchor), IndexOf(fight)
         if from > to then from, to = to, from end
         wipe(selected)
@@ -777,7 +784,7 @@ local function ShowDetail(fight)
             date("%m/%d %H:%M", fight.date), date("%m/%d %H:%M", fight.lastDate),
             ns.FormatDuration(fight.duration), fight.zone))
     else
-        detail.title:SetText(fight.name .. ResultText(fight))
+        detail.title:SetText(fight.name .. (fight.isLive and "  |cff40ff40in combat|r" or ResultText(fight)))
         detail.info:SetText(string.format("%s  ·  %s  ·  %s",
             date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
     end
@@ -841,6 +848,7 @@ function ns.RefreshHistory()
     -- Drop selected fights that were pruned or deleted; fall back to the newest if nothing is left.
     local present = {}
     for _, fight in ipairs(fights) do present[fight] = true end
+    if ns.current then present[ns.current] = true end
     for fight in pairs(selected) do
         if not present[fight] then selected[fight] = nil end
     end
@@ -849,28 +857,42 @@ function ns.RefreshHistory()
         SelectOnly(fights[#fights])
     end
     local selectedList = SelectedFights()
+    local deletable = #SelectedFights(false)
 
-    local count = #fights
-    for i = 1, count do
-        local fight = fights[count - i + 1]
+    -- The list: the running fight first (live), then saved fights, newest first.
+    local live = ns.LiveFightView()
+    local listed = {}
+    if live then table.insert(listed, ns.current) end
+    for i = #fights, 1, -1 do table.insert(listed, fights[i]) end
+
+    for i, fight in ipairs(listed) do
         local row = GetRow(i)
         row.fight = fight
-        row.name:SetText(fight.name .. ResultText(fight))
-        row.spent:SetText(ns.FormatNumber(fight.spent))
-        row.info:SetText(string.format("%s  ·  %s  ·  %s",
-            date("%m/%d %H:%M", fight.date), ns.FormatDuration(fight.duration), fight.zone or ""))
+        local isLive = fight == ns.current
+        local shown = isLive and live or fight
+        row.name:SetText(shown.name .. (isLive and "  |cff40ff40in combat|r" or ResultText(shown)))
+        row.spent:SetText(ns.FormatNumber(shown.spent))
+        row.info:SetText(string.format("%s  ·  %s  ·  %s", isLive and "Now" or date("%m/%d %H:%M", shown.date),
+            ns.FormatDuration(shown.duration), shown.zone or ""))
         row.selected:SetShown(selected[fight] == true)
+        row.delete:SetShown(not isLive) -- the running fight can't be deleted
         row:Show()
     end
-    for i = count + 1, #rows do
+    for i = #listed + 1, #rows do
         rows[i]:Hide()
     end
-    listContent:SetHeight(math.max(1, count * (ROW_HEIGHT + ROW_GAP)))
+    listContent:SetHeight(math.max(1, #listed * (ROW_HEIGHT + ROW_GAP)))
 
+    local count = #fights
     clearButton:SetEnabled(count > 0)
-    selectAllButton:SetEnabled(count > 1 and #selectedList < count)
-    deleteButton:SetEnabled(#selectedList > 0)
-    deleteButton:SetText(#selectedList > 1 and ("Delete " .. #selectedList .. " segments") or "Delete segment")
+    selectAllButton:SetEnabled(count > 1 and #selectedList < #listed)
+    deleteButton:SetEnabled(deletable > 0)
+    deleteButton:SetText(deletable > 1 and ("Delete " .. deletable .. " segments") or "Delete segment")
+
+    -- The running fight is shown through a live view (duration so far, uptime of buffs still up).
+    for i, fight in ipairs(selectedList) do
+        if fight == ns.current then selectedList[i] = live end
+    end
     if #selectedList > 1 then
         ShowDetail(CombineFights(selectedList))
     else
@@ -879,9 +901,26 @@ function ns.RefreshHistory()
     animateBars = false -- only the refresh right after a selection change animates
 end
 
+-- While in combat with the panel open, refresh every second so the running fight updates live.
+C_Timer.NewTicker(LIVE_REFRESH_INTERVAL, function()
+    if ns.current and panel and panel:IsShown() then
+        animateBars = true -- bars slide as mana is spent, and new spells' bars grow in
+        ns.RefreshHistory()
+    end
+end)
+
+-- When a fight starts with the panel open, switch to it, like a new segment in a damage meter.
+table.insert(ns.fightStartListeners, function(fight)
+    if not panel or not panel:IsShown() then return end
+    SelectOnly(fight)
+    animateBars = true
+    listScroll:SetVerticalScroll(0)
+    ns.RefreshHistory()
+end)
+
 -- Deletes the selected fights; asks first when there's more than one.
 local function DeleteSelected()
-    local list = SelectedFights()
+    local list = SelectedFights(false)
     if #list > 1 then
         StaticPopup_Show("MANAMASTER_DELETE_SELECTED", #list)
     else
@@ -893,7 +932,7 @@ StaticPopupDialogs["MANAMASTER_DELETE_SELECTED"] = {
     text = "Delete the %d selected fights? This can't be undone.",
     button1 = YES,
     button2 = NO,
-    OnAccept = function() DeleteFights(SelectedFights()) end,
+    OnAccept = function() DeleteFights(SelectedFights(false)) end,
     timeout = 0,
     whileDead = true,
     hideOnEscape = true,
