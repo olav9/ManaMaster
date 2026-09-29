@@ -36,7 +36,7 @@ local SECTION_GAP = 12 -- space above each section after the first
 
 local BUTTON_AREA = 40 -- space under the scroll areas for the Clear/Delete buttons
 
-local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton
+local panel, listScroll, listContent, detailScroll, detailContent, detail, clearButton, deleteButton, selectAllButton
 local listWidth, detailWidth = 0, 0 -- set by UpdateLayout from the panel's current width
 local rows, entryRows, sectionHeaders = {}, {}, {}
 -- Selected fights, as a set of fight tables (so the selection survives new fights being added).
@@ -868,6 +868,7 @@ function ns.RefreshHistory()
     listContent:SetHeight(math.max(1, count * (ROW_HEIGHT + ROW_GAP)))
 
     clearButton:SetEnabled(count > 0)
+    selectAllButton:SetEnabled(count > 1 and #selectedList < count)
     deleteButton:SetEnabled(#selectedList > 0)
     deleteButton:SetText(#selectedList > 1 and ("Delete " .. #selectedList .. " segments") or "Delete segment")
     if #selectedList > 1 then
@@ -988,10 +989,25 @@ local function CreatePanel()
 
     clearButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     clearButton:SetSize(120, 22)
-    clearButton:SetPoint("BOTTOMLEFT", 12, 12)
     clearButton:SetText("Clear history")
     clearButton:SetScript("OnClick", function()
         StaticPopup_Show("MANAMASTER_CLEAR_HISTORY", #ns.char.fights)
+    end)
+
+    -- Selects every saved fight, so the details pane combines them all.
+    selectAllButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    selectAllButton:SetSize(120, 22)
+    -- Select all sits in the corner, with Clear history to its right.
+    selectAllButton:SetPoint("BOTTOMLEFT", 12, 12)
+    clearButton:SetPoint("LEFT", selectAllButton, "RIGHT", 8, 0)
+    selectAllButton:SetText("Select all")
+    selectAllButton:SetScript("OnClick", function()
+        local fights = ns.char.fights
+        wipe(selected)
+        for _, fight in ipairs(fights) do selected[fight] = true end
+        selectionAnchor = fights[#fights] -- Shift+click then extends from the newest fight
+        animateBars = true
+        ns.RefreshHistory()
     end)
 
     deleteButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
