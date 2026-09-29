@@ -46,6 +46,15 @@ local defaults = {
 
 local frame = CreateFrame("Frame")
 local encounterActive = false
+-- In an arena the whole match is one fight: it starts at the first combat and stays open between bursts
+-- (drinking, resetting) until the match ends or the player leaves the arena.
+local arenaActive = false
+local arenaMatchOver = false -- set when the match ends, cleared on leaving the arena
+
+local function InArena()
+    local _, instanceType = GetInstanceInfo()
+    return instanceType == "arena"
+end
 local recentCasts = {} -- mana casts made out of combat, within PRECOMBAT_WINDOW
 ns.current = nil -- the fight being tracked, nil when out of combat
 ns.debugMode = false -- not saved; turn on with /mm debug
@@ -624,8 +633,9 @@ local function StartFight(encounterName)
     local mana = GetMana()
     local targetName = GetHostileTargetName()
     local fight = {
-        name = encounterName or targetName or "Combat",
+        name = encounterName or (arenaActive and ("Arena: " .. GetRealZoneText())) or targetName or "Combat",
         isEncounter = encounterName ~= nil,
+        isArena = arenaActive or nil,
         targetName = targetName,
         zone = GetRealZoneText(),
         date = time(),
@@ -753,7 +763,7 @@ end
 -- Names a fight after the first hostile target if the player had none when combat started.
 local function OnTargetChanged()
     local current = ns.current
-    if not current or current.isEncounter or current.targetName then return end
+    if not current or current.isEncounter or current.isArena or current.targetName then return end
     local targetName = GetHostileTargetName()
     if targetName then
         current.targetName = targetName
@@ -817,13 +827,32 @@ frame:SetScript("OnEvent", function(self, event, ...)
             self:UnregisterEvent("ADDON_LOADED")
         end
     elseif event == "PLAYER_REGEN_DISABLED" then
+        if InArena() and not arenaMatchOver then
+            arenaActive = true
+        end
         StartFight()
     elseif event == "PLAYER_REGEN_ENABLED" then
-        -- During a boss encounter, wait for ENCOUNTER_END so dying or a brief drop out of combat doesn't split the fight.
-        if not encounterActive then
+        -- During a boss encounter, wait for ENCOUNTER_END so dying or a brief drop out of combat doesn't split
+        -- the fight; in an arena, keep the whole match as one fight.
+        if not encounterActive and not arenaActive then
             EndFight()
         end
         ns.Mana.OnCombatEnd()
+    elseif event == "PVP_MATCH_COMPLETE" then
+        if arenaActive then
+            arenaActive = false
+            arenaMatchOver = true -- don't start a new arena fight in the post-match wait
+            EndFight()
+        end
+    elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        if not InArena() then
+            arenaMatchOver = false
+            if arenaActive then
+                -- Left the arena without a match-complete event (e.g. left early).
+                arenaActive = false
+                EndFight()
+            end
+        end
     elseif event == "ENCOUNTER_START" then
         local _, encounterName = ...
         encounterActive = true
@@ -863,6 +892,10 @@ frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("ENCOUNTER_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
+frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+-- Not every client may have this event; registering an unknown event errors, so guard it.
+pcall(frame.RegisterEvent, frame, "PVP_MATCH_COMPLETE")
 frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
