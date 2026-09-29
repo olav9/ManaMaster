@@ -203,6 +203,42 @@ local function SizeChanged()
     for _, row in ipairs(plugin.Rows) do LayoutRow(row) end
 end
 
+-- Bar animation: each row slides from its current value to the new one, like the history panel's bars,
+-- so bars grow as mana is spent and new spells' bars grow in from zero.
+local BAR_ANIM_DURATION = 0.3 -- seconds
+local animatingRows = {}
+local animFrame = CreateFrame("Frame")
+animFrame:Hide()
+animFrame:SetScript("OnUpdate", function()
+    local now = GetTime()
+    for row in pairs(animatingRows) do
+        local t = (now - row.animStart) / BAR_ANIM_DURATION
+        if t >= 1 then
+            row.animValue = row.animTo
+            animatingRows[row] = nil
+        else
+            local eased = 1 - (1 - t) ^ 3 -- ease-out: fast start, gentle stop
+            row.animValue = row.animFrom + (row.animTo - row.animFrom) * eased
+        end
+        row:SetValue(row.animValue)
+    end
+    if not next(animatingRows) then animFrame:Hide() end
+end)
+
+-- Sets a row's bar value (0-100), sliding from where it is. wasShown: rows that weren't visible grow from 0.
+local function SetRowValue(row, value, wasShown)
+    local from = wasShown and (row.animValue or 0) or 0
+    if math.abs(from - value) < 0.1 then
+        animatingRows[row] = nil
+        row.animValue = value
+        row:SetValue(value)
+        return
+    end
+    row.animFrom, row.animTo, row.animStart = from, value, GetTime()
+    animatingRows[row] = true
+    animFrame:Show()
+end
+
 -- Fills the rows with the spells of the fights matching the window's segment, most mana first; bars are
 -- relative to the top spell. Reads the window's segment each time, so switching segments shows up at the
 -- next refresh.
@@ -220,6 +256,8 @@ local function Update()
             -- Say why the window is empty rather than showing nothing.
             row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment" or "No mana spent")
             row:SetRightText("")
+            animatingRows[row] = nil
+            row.animValue = 0
             row:SetValue(0)
             row:SetIcon(UNKNOWN_ICON, ICON_COORDS)
             row:Show()
@@ -227,7 +265,8 @@ local function Update()
             local pct = total > 0 and spell.mana / total * 100 or 0
             row:SetLeftText(spell.name .. (spell.rank and (" (" .. spell.rank .. ")") or ""))
             row:SetRightText(string.format("%s (%.0f%%)", ns.FormatNumber(spell.mana), pct))
-            row:SetValue(top > 0 and spell.mana / top * 100 or 0)
+            -- A row that showed a different spell before (spells reorder as mana changes) slides from there too.
+            SetRowValue(row, top > 0 and spell.mana / top * 100 or 0, row.statusbar:IsShown())
             row:SetIcon(C_Spell.GetSpellTexture(spell.spellID or spell.name) or UNKNOWN_ICON, ICON_COORDS)
             row:SetColor(BAR_R, BAR_G, BAR_B)
             row:Show()
