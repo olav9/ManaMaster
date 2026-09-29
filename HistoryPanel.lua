@@ -421,12 +421,18 @@ local function BuildSavedEntries(saved)
 end
 
 -- Passive regen broken into Mana gained rows of their own: each regen buff with a known mana per 5 sec
--- (estimated over its uptime, marked "passive"), and the rest split into "Regen while casting" and "Full regen"
+-- (estimated over its uptime; row text "12 mp5"), and the rest split into "Regen while casting" and "Full regen"
 -- by the five-second rule (or "Spirit and base regen" for fights without that data). With nothing to break it
 -- into, it's one "Passive regen" row. Buffs whose regen arrives as logged periodic ticks (e.g. Mana Spring on
 -- TBC) already have their own gain row, so they're left out; one-off logged gains (e.g. Water Shield orbs)
 -- don't cover a buff's passive mp5, so those buffs stay in. The buff estimates ignore regen lost at full
 -- mana, so if they add up to more than the passive total they're scaled down, keeping the parts equal to it.
+-- "12 mp5", "2 mp5", "0.5 mp5": mana per 5 seconds, the unit regen rows use everywhere.
+local function FormatMP5(mp5)
+    local text = mp5 >= 10 and string.format("%d", mp5 + 0.5) or (string.format("%.1f", mp5):gsub("%.0$", ""))
+    return text .. " mp5"
+end
+
 local function PassiveRegenGroup(fight, passive, passiveRank)
     local coveredByTicks = {}
     for _, entry in pairs(fight.gains or {}) do
@@ -442,10 +448,10 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         if data.mp5 and (data.uptime or 0) > 0 and not coveredByTicks[name] then
             local mana = data.mp5 / 5 * data.uptime
             estimated = estimated + mana
-            -- mp5 and seconds are also kept as data, for the compact rows of the meter window.
+            -- Row text is just the mp5; seconds go in the count column. Explanations are in the tooltip.
             table.insert(children, { name = name, icon = data.icon, spellID = data.spellID,
-                rank = "passive " .. ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana,
-                mp5 = data.mp5, seconds = data.uptime })
+                rank = FormatMP5(data.mp5), mana = mana, mp5 = data.mp5, seconds = data.uptime,
+                description = "Estimated from the buff's mp5 over its uptime." })
         end
     end
 
@@ -482,44 +488,38 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
             full, unaccounted = rest - casting, 0
         end
 
-        -- Average rates the game reported (spirit and gear mp5; not Blessing of Wisdom), to compare with the
-        -- character sheet.
-        local FormatDuration = ns.FormatDuration
-        local function Rate(regen, seconds)
-            return seconds > 0 and string.format("%.1f/s", regen / seconds) or "no time"
-        end
+        -- The average rate the game reported in each window (spirit and gear mp5; not Blessing of Wisdom), as
+        -- mp5 like the buff rows. Where it comes from is in the tooltip.
         local function MP5(regen, seconds)
             return seconds > 0 and regen / seconds * 5 or nil
         end
-        -- The row text leads with where the regen comes from; the tooltip explains the window.
         if casting >= 1 then
+            local mp5 = MP5(split.castingRegen, split.castingTime)
             table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, mana = casting,
-                mp5 = MP5(split.castingRegen, split.castingTime), seconds = split.castingTime,
-                rank = string.format("mp5 from gear and talents  ·  %s  ·  %s",
-                    Rate(split.castingRegen, split.castingTime), FormatDuration(split.castingTime)),
+                mp5 = mp5, seconds = split.castingTime, rank = mp5 and FormatMP5(mp5),
                 description = "Regen within 5 seconds of spending mana (the five-second rule). Spirit regen "
                     .. "stops there; what's left is mp5 from gear and talents such as Arcane Meditation, "
                     .. "at the rate the game reports." })
         end
         if full >= 1 then
+            local mp5 = MP5(split.fullRegen, split.fullTime)
             table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = full,
-                mp5 = MP5(split.fullRegen, split.fullTime), seconds = split.fullTime,
-                rank = string.format("spirit and mp5  ·  %s  ·  %s",
-                    Rate(split.fullRegen, split.fullTime), FormatDuration(split.fullTime)),
+                mp5 = mp5, seconds = split.fullTime, rank = mp5 and FormatMP5(mp5),
                 description = "Regen more than 5 seconds after the last mana spend, at the full rate the game "
                     .. "reports: spirit plus mp5 from gear and talents." })
         end
         if unaccounted >= 1 then
             table.insert(children, { name = "Unaccounted", icon = UNKNOWN_ICON, mana = unaccounted,
-                rank = "measured recovery not explained by regen or logged gains" })
+                description = "Measured recovery not explained by regen or logged gains." })
         end
     elseif rest >= 1 and #children > 0 then
-        table.insert(children, { name = "Spirit and base regen", rank = "the rest", mana = rest, icon = GAIN_ICON })
+        table.insert(children, { name = "Spirit and base regen", mana = rest, icon = GAIN_ICON,
+            description = "Passive regen not covered by the buffs above." })
     end
 
     -- Without anything to break it into (e.g. fights saved before the split), keep one Passive regen row.
     if #children == 0 then
-        return { { name = "Passive regen", rank = passiveRank, mana = passive, icon = GAIN_ICON } }
+        return { { name = "Passive regen", mana = passive, icon = GAIN_ICON, description = passiveRank } }
     end
     return children
 end
@@ -585,7 +585,7 @@ local function BuildPowerSections(fight, token)
         -- Logged (TBC) or estimated from the ability's description (Charge, Bloodrage, potions).
         gained = ns.SortedEntries(entry.gains)
         for _, gain in ipairs(gained) do
-            if gain.estimated then gain.rank = (gain.rank and (gain.rank .. ", ") or "") .. "estimated" end
+            if gain.estimated then gain.description = "Estimated from the ability's description." end
         end
     end
     if not entry then
@@ -602,7 +602,7 @@ local function BuildPowerSections(fight, token)
         if rest >= 1 then
             table.insert(gained, {
                 name = token == "RAGE" and "From damage dealt and taken" or (label .. " regeneration"),
-                rank = "measured, not from a known source", mana = rest, icon = gainIcon,
+                description = "Measured, not from a known source.", mana = rest, icon = gainIcon,
             })
         end
         table.sort(gained, function(a, c) return a.mana > c.mana end)
@@ -612,8 +612,8 @@ local function BuildPowerSections(fight, token)
         end
     end
     if entry and (entry.wastedCap or 0) >= 1 then
-        table.insert(gained, { name = "Wasted at max " .. label:lower(),
-            rank = ns.FormatDuration(entry.cappedTime or 0) .. " at max  ·  estimated",
+        table.insert(gained, { name = "Wasted at max " .. label:lower(), seconds = entry.cappedTime,
+            description = "Estimated: time at max " .. label:lower() .. " times the regeneration rate.",
             mana = entry.wastedCap, icon = WASTED_ICON, excluded = true })
     end
 
@@ -642,7 +642,7 @@ local function BuildSections(fight, power)
     if fight.gainsMeasured then
         gained = ns.SortedEntries(fight.gains)
         passive = (fight.recovered or 0) - ns.RestoredTotal(fight)
-        passiveRank = "recovered mana not from a logged source"
+        passiveRank = "Recovered mana not from a logged source."
     elseif fight.recovered then
         gained = {}
         if fight.recovered > 0 then
@@ -650,11 +650,12 @@ local function BuildSections(fight, power)
         end
     else
         gained = ns.SortedEntries(fight.gains)
+        -- Potions and drinks keep their restore range as row text (e.g. "140-180"); "estimated" is a tooltip line.
         for _, entry in ipairs(gained) do
-            entry.rank = entry.rank and (entry.rank .. ", estimated") or "estimated"
+            entry.description = "Estimated: mana isn't readable on this client."
         end
         passive = fight.regen
-        passiveRank = "estimated"
+        passiveRank = "Estimated from the game's regen rates."
     end
     table.sort(gained, function(a, b) return a.mana > b.mana end)
 
@@ -672,19 +673,21 @@ local function BuildSections(fight, power)
     if fight.wastedFull then
         if fight.wastedFull >= 1 then
             local name = fight.gainsMeasured and "Overenergized (past max mana)" or "Wasted at full mana"
-            table.insert(gained, { name = name, rank = not fight.gainsMeasured and "estimated" or nil,
-                mana = fight.wastedFull, icon = WASTED_ICON, excluded = true })
+            table.insert(gained, { name = name, mana = fight.wastedFull, icon = WASTED_ICON, excluded = true,
+                description = fight.gainsMeasured and "Mana gained past max mana, from the combat log."
+                    or "Estimated regen lost while at full mana, after the fight's first mana spend." })
         end
         if fight.wastedBlocked >= 1 then
-            table.insert(gained, { name = "Wasted while regen blocked", rank = "estimated", mana = fight.wastedBlocked,
-                icon = WASTED_ICON, excluded = true })
+            table.insert(gained, { name = "Wasted while regen blocked", mana = fight.wastedBlocked,
+                icon = WASTED_ICON, excluded = true,
+                description = "Estimated regen lost while a regen-blocking debuff was up." })
         end
     end
 
     -- The arena's end-of-match refill: shown for completeness, but not mana recovered during the match.
     if fight.matchRefill then
-        table.insert(gained, { name = "Match-end refill", rank = "arena refills mana as the match ends; not counted",
-            mana = fight.matchRefill, icon = GAIN_ICON, excluded = true })
+        table.insert(gained, { name = "Match-end refill", mana = fight.matchRefill, icon = GAIN_ICON, excluded = true,
+            description = "The arena refills mana as the match ends. Not counted as mana gained." })
     end
 
     local sections = {
@@ -697,32 +700,12 @@ local function BuildSections(fight, power)
     -- Regen buff uptime sits right under Mana gained, since the buffs explain much of the gains.
     -- Fights saved before buff tracking have no buffs table; skip the section for those.
     if fight.buffs then
-        -- Mana logged from the combat log (TBC) per source name, to show next to buffs of the same name.
-        local loggedByName = {}
-        if fight.gainsMeasured then
-            for _, entry in pairs(fight.gains or {}) do
-                loggedByName[entry.name] = (loggedByName[entry.name] or 0) + entry.mana
-            end
-        end
-
+        -- Just the time and share: what each buff was worth (its mp5 estimate, logged ticks) is in Mana gained.
         local buffs = {}
         for name, data in pairs(fight.buffs) do
             local fraction = fight.duration > 0 and math.min(1, data.uptime / fight.duration) or 0
-            -- What the buff was worth: an estimate from its mana per 5 sec over its uptime (regen past max
-            -- mana isn't subtracted), and/or the exact mana logged under its name (e.g. Mana Spring ticks,
-            -- Water Shield orbs). Both can apply: Water Shield's passive mp5 isn't logged, its orbs are.
-            local parts = {}
-            if data.mp5 then
-                table.insert(parts, string.format("%s mp5  ·  ~%s est.", ns.FormatNumber(data.mp5),
-                    ns.FormatNumber(data.mp5 / 5 * data.uptime)))
-            end
-            if loggedByName[name] then
-                table.insert(parts, "+" .. ns.FormatNumber(loggedByName[name]) .. " logged")
-            end
-            local worth = #parts > 0 and table.concat(parts, "  ·  ") or nil
             table.insert(buffs, {
                 name = name,
-                rank = worth,
                 spellID = data.spellID,
                 icon = data.icon,
                 casts = ns.FormatDuration(data.uptime),
@@ -756,9 +739,7 @@ local BAR_GREY = "|cff999999"
 -- The bar's left text: the name, plus the mp5 for regen rows. Ranks are in the tooltip, not on the bar.
 function ns.BarLabel(entry)
     if not entry.mp5 then return entry.name end
-    local mp5 = entry.mp5 >= 10 and string.format("%d", entry.mp5 + 0.5)
-        or (string.format("%.1f", entry.mp5):gsub("%.0$", ""))
-    return entry.name .. "  " .. BAR_GREY .. mp5 .. " mp5|r"
+    return entry.name .. "  " .. BAR_GREY .. FormatMP5(entry.mp5) .. "|r"
 end
 
 -- Whether any line of GameTooltip already reads text (e.g. the spell tooltip's own "Rank 3").
@@ -798,7 +779,8 @@ function ns.ShowBarTooltip(owner, entry)
             GameTooltip:AddLine(entry.name or "", 1, 1, 1)
         end
     end
-    if entry.rank and not isRank then
+    -- Other row text (e.g. a potion's range), unless it's the mp5 the bar already shows.
+    if entry.rank and not isRank and not entry.mp5 then
         GameTooltip:AddLine(entry.rank, 1, 1, 1, true)
     end
     if entry.description then GameTooltip:AddLine(entry.description, 0.8, 0.8, 0.8, true) end
@@ -914,7 +896,8 @@ local function ShowSections(fight, power)
             row.iconButton.text = entry.description and ((entry.rank and (entry.rank .. "\n\n") or "")
                 .. entry.description) or entry.rank
             row.iconButton:Show()
-            row.casts:SetText(entry.casts or "")
+            -- Regen rows show their seconds in the count column, like the meter window ("16s").
+            row.casts:SetText(entry.seconds and string.format("%ds", entry.seconds + 0.5) or entry.casts or "")
             local fraction
             if section.isUptime then
                 row.mana:SetText(entry.valueText)
