@@ -16,7 +16,7 @@ local MANA = Enum.PowerType.Mana
 local MAX_HISTORY = 50
 -- Seconds before combat whose mana casts count toward the fight. Long enough for a pre-pull setup, e.g. a
 -- shaman dropping four totems on the global cooldown before the pull cast.
-local PRECOMBAT_WINDOW = 10
+local PRECOMBAT_WINDOW = 15
 local MAX_AURA_SCAN = 64 -- buff slots to check; a slot that errors doesn't tell us whether more follow
 local PREFIX = "|cff3fa9f5ManaMaster|r "
 
