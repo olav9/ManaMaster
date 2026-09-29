@@ -398,7 +398,7 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
             local mana = data.mp5 / 5 * data.uptime
             estimated = estimated + mana
             table.insert(children, { name = name, icon = data.icon, spellID = data.spellID,
-                rank = ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana, child = true })
+                rank = "passive " .. ns.FormatNumber(data.mp5) .. " mp5  ·  estimated", mana = mana })
         end
     end
 
@@ -421,23 +421,22 @@ local function PassiveRegenGroup(fight, passive, passiveRank)
         local casting = rest * baseCasting / (baseCasting + baseFull)
         local FormatDuration = ns.FormatDuration
         if casting >= 1 then
-            table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, child = true, mana = casting,
+            table.insert(children, { name = "Regen while casting", icon = GAIN_ICON, mana = casting,
                 rank = FormatDuration(split.castingTime) .. " within the 5-second rule  ·  estimated split" })
         end
         if rest - casting >= 1 then
-            table.insert(children, { name = "Full regen", icon = GAIN_ICON, child = true, mana = rest - casting,
+            table.insert(children, { name = "Full regen", icon = GAIN_ICON, mana = rest - casting,
                 rank = FormatDuration(split.fullTime) .. " outside the 5-second rule  ·  estimated split" })
         end
     elseif rest >= 1 and #children > 0 then
-        table.insert(children, { name = "Spirit and base regen", rank = "the rest", mana = rest, icon = GAIN_ICON,
-            child = true })
+        table.insert(children, { name = "Spirit and base regen", rank = "the rest", mana = rest, icon = GAIN_ICON })
     end
 
-    -- Biggest first, so the main contributor is at the top.
-    table.sort(children, function(a, b) return a.mana > b.mana end)
-    local group = { { name = "Passive regen", rank = passiveRank, mana = passive, icon = GAIN_ICON } }
-    for _, child in ipairs(children) do table.insert(group, child) end
-    return group
+    -- Without anything to break it into (e.g. fights saved before the split), keep one Passive regen row.
+    if #children == 0 then
+        return { { name = "Passive regen", rank = passiveRank, mana = passive, icon = GAIN_ICON } }
+    end
+    return children
 end
 
 -- The sections for a fight, top to bottom: spent, gained, regen buff uptime, saved, drained.
@@ -467,16 +466,13 @@ local function BuildSections(fight)
     end
     table.sort(gained, function(a, b) return a.mana > b.mana end)
 
-    -- Passive regen and its breakdown go in at the position its total sorts to, kept together.
+    -- Passive regen goes in as its parts (buffs, regen while casting, full regen), each a row of its own,
+    -- sorted with the other gains so the biggest source is at the top.
     if passive and passive >= 1 then
-        local group = PassiveRegenGroup(fight, passive, passiveRank)
-        local at = #gained + 1
-        for i, entry in ipairs(gained) do
-            if entry.mana < passive then at = i break end
+        for _, entry in ipairs(PassiveRegenGroup(fight, passive, passiveRank)) do
+            table.insert(gained, entry)
         end
-        for offset, entry in ipairs(group) do
-            table.insert(gained, at + offset - 1, entry)
-        end
+        table.sort(gained, function(a, b) return a.mana > b.mana end)
     end
 
     -- Wasted mana goes last, in grey, and isn't counted in the section total since it was never gained.
