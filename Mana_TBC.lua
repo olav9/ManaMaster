@@ -1,6 +1,7 @@
 local _, ns = ...
 
--- TBC Anniversary (interface 20506): the player's mana is readable, so the shared core measures spent,
+-- TBC Anniversary (interface 20506) and Classic Era (ManaMaster_Vanilla.toc): the player's mana is readable,
+-- so the shared core measures spent,
 -- recovered and lowest mana directly from UNIT_POWER_FREQUENT deltas. The combat log is available too,
 -- so mana gains (potions, Mana Spring, Water Shield, ...) and drains aimed at the player are recorded per
 -- source with exact amounts. Nothing is estimated.
@@ -85,6 +86,13 @@ ns.Mana.logsPowerGains = true -- rage/energy gains come from the combat log, so 
 
 function ns.Mana.Init()
     playerGUID = UnitGUID("player")
+    -- Safety net: if a WoW Forever client (build 16001-19999) ever loads this file through the wrong TOC,
+    -- don't register the combat log there, since that triggers the "blocked action" pop-up.
+    local build = select(4, GetBuildInfo())
+    if build >= 16000 and build < 20000 then
+        print(ns.PREFIX .. "wrong client file loaded (combat log version on WoW Forever); combat log not used")
+        return
+    end
     combatLogFrame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 end
 
