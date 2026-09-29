@@ -739,6 +739,9 @@ local function EndFight(success)
     end
 
     fight.duration = now - fight.startClock
+    -- Game-clock (GetTime) start and end, kept so other addons' segments can be matched to this fight, e.g.
+    -- the Details plugin. GetTime runs from computer boot, so it stays comparable across reloads until a reboot.
+    fight.gameStart, fight.gameEnd = fight.startClock, now
     fight.endMana = fight.lastMana
     fight.success = success
     fight.startClock = nil

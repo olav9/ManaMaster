@@ -4,9 +4,11 @@
 ## Author: olsen
 ## Version: 0.1.0
 ## SavedVariables: ManaMasterDB
+## OptionalDeps: Details
 ## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
 
 ManaMaster.lua
 Mana_TBC.lua
 HistoryPanel.lua
 MinimapButton.lua
+DetailsPlugin.lua
