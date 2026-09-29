@@ -12,7 +12,6 @@ local ROW_HEIGHT = 42
 local ROW_GAP = 2 -- space between fight rows
 local ROW_PAD_X = 12 -- inner padding of fight rows
 local ROW_PAD_Y = 7
-local DELETE_SIZE = 14
 local SPELL_ROW_HEIGHT = 20
 local SPELL_ICON_SIZE = 16
 local UNKNOWN_ICON = 134400 -- question mark
@@ -228,29 +227,8 @@ local function GetRow(i)
     row.selected:SetAllPoints()
     row.selected:SetColorTexture(ACCENT_R, ACCENT_G, ACCENT_B, 0.3)
 
-    row.delete = CreateFrame("Button", nil, row)
-    row.delete:SetSize(DELETE_SIZE, DELETE_SIZE)
-    row.delete:SetPoint("RIGHT", -ROW_PAD_X, 0)
-    row.delete:SetNormalTexture("Interface\\Buttons\\UI-StopButton")
-    row.delete:SetHighlightTexture("Interface\\Buttons\\UI-StopButton", "ADD")
-    row.delete:SetAlpha(0.5)
-    row.delete:SetScript("OnEnter", function(self)
-        self:SetAlpha(1)
-        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-        GameTooltip:AddLine("Delete segment")
-        GameTooltip:Show()
-    end)
-    row.delete:SetScript("OnLeave", function(self)
-        self:SetAlpha(0.5)
-        GameTooltip:Hide()
-    end)
-    row.delete:SetScript("OnClick", function()
-        DeleteFights({ row.fight })
-    end)
-
     row.spent = row:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    local textRight = ROW_PAD_X + DELETE_SIZE + 10 -- keeps text clear of the delete button
-    row.spent:SetPoint("TOPRIGHT", -textRight, -ROW_PAD_Y)
+    row.spent:SetPoint("TOPRIGHT", -ROW_PAD_X, -ROW_PAD_Y)
     row.spent:SetJustifyH("RIGHT")
 
     row.name = row:CreateFontString(nil, "OVERLAY", "GameFontNormal")
@@ -261,7 +239,7 @@ local function GetRow(i)
 
     row.info = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
     row.info:SetPoint("BOTTOMLEFT", ROW_PAD_X, ROW_PAD_Y)
-    row.info:SetPoint("BOTTOMRIGHT", -textRight, ROW_PAD_Y)
+    row.info:SetPoint("BOTTOMRIGHT", -ROW_PAD_X, ROW_PAD_Y)
     row.info:SetJustifyH("LEFT")
     row.info:SetWordWrap(false)
 
@@ -884,7 +862,6 @@ function ns.RefreshHistory()
         row.info:SetText(string.format("%s  ·  %s  ·  %s", isLive and "Now" or date("%m/%d %H:%M", shown.date),
             ns.FormatDuration(shown.duration), shown.zone or ""))
         row.selected:SetShown(selected[fight] == true)
-        row.delete:SetShown(not isLive) -- the running fight can't be deleted
         row:Show()
     end
     for i = #listed + 1, #rows do
