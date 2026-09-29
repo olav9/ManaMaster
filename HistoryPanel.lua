@@ -296,6 +296,22 @@ local function SetRowIndent(row, indent)
     row.name:SetPoint("RIGHT", row.casts, "LEFT", -4, 0)
 end
 
+-- Tooltip for a detail row's icon button: the game's own tooltip for its spell, or the row's name and
+-- description when there's no spell (or the client can't show it).
+local function ShowRowTooltip(button)
+    GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+    if button.spellID and pcall(GameTooltip.SetSpellByID, GameTooltip, button.spellID) then
+        GameTooltip:Show()
+        return
+    end
+    GameTooltip:ClearLines()
+    GameTooltip:AddLine(button.title or "")
+    if button.text then
+        GameTooltip:AddLine(button.text, 1, 1, 1, true)
+    end
+    GameTooltip:Show()
+end
+
 local function GetEntryRow(i)
     if entryRows[i] then return entryRows[i] end
 
@@ -321,6 +337,14 @@ local function GetEntryRow(i)
     row.icon:SetSize(SPELL_ICON_SIZE, SPELL_ICON_SIZE)
     row.icon:SetPoint("LEFT", 4, 0)
     row.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92) -- trim the icon's built-in border
+
+    -- Hovering the icon shows the spell's tooltip (abilities, auras, potion effects). Rows without a spell,
+    -- like "Full regen", show their name and description instead. A button over the icon, since textures
+    -- can't take the mouse; it follows the icon when SetRowIndent moves it.
+    row.iconButton = CreateFrame("Button", nil, row)
+    row.iconButton:SetAllPoints(row.icon)
+    row.iconButton:SetScript("OnEnter", ShowRowTooltip)
+    row.iconButton:SetScript("OnLeave", GameTooltip_Hide)
 
     row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.name:SetPoint("LEFT", SPELL_NAME_LEFT, 0)
@@ -646,6 +670,10 @@ local function ShowSections(fight)
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
             row.icon:SetDesaturated(entry.excluded == true)
             row.icon:Show()
+            row.iconButton.spellID = type(entry.spellID) == "number" and entry.spellID or nil
+            row.iconButton.title = entry.name
+            row.iconButton.text = entry.rank
+            row.iconButton:Show()
             row.casts:SetText(entry.casts or "")
             local fraction
             if section.isUptime then
@@ -684,6 +712,7 @@ local function ShowSections(fight)
             SetRowIndent(row, 0)
             row.name:SetText("|cff888888None recorded|r")
             row.icon:Hide()
+            row.iconButton:Hide()
             row.casts:SetText("")
             row.mana:SetText("")
             row.bar:Hide()
