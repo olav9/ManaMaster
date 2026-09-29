@@ -350,9 +350,9 @@ local function PaidCost(castGUID, spellID)
 end
 
 -- Learns a spell's normal cost from casts with no reducer buff up at start or finish, and returns it.
--- Stored per spell ID (so per rank) across sessions in ManaMasterDB.normalCosts.
+-- Stored per spell ID (so per rank) and per character across sessions in ns.char.normalCosts.
 local function NormalCost(spellID, snap, reducersAfter)
-    local costs = ns.db.normalCosts
+    local costs = ns.char.normalCosts
     if snap and snap.cost > 0 and not next(snap.reducers) and not next(reducersAfter) then
         costs[spellID] = math.max(costs[spellID] or 0, snap.cost)
     end
@@ -752,7 +752,7 @@ local function EndFight(success)
     fight.castSpent = nil
     HideDisplayLater()
 
-    local fights = ns.db.fights
+    local fights = ns.char.fights
     table.insert(fights, fight)
     while #fights > MAX_HISTORY do
         table.remove(fights, 1)
@@ -853,9 +853,27 @@ local function OnAddonLoaded()
             ManaMasterDB[key] = value
         end
     end
-    ManaMasterDB.fights = ManaMasterDB.fights or {}
-    ManaMasterDB.normalCosts = ManaMasterDB.normalCosts or {} -- learned per spell ID, for mana saved
+    -- Fights and learned costs are per character: ManaMasterDB.characters["Name-Realm"] = { fights,
+    -- normalCosts } (costs depend on talents and ranks). Settings like panel size stay account-wide.
+    ManaMasterDB.characters = ManaMasterDB.characters or {}
+    local charKey = UnitName("player") .. "-" .. GetRealmName()
+    local char = ManaMasterDB.characters[charKey]
+    if not char then
+        char = {}
+        ManaMasterDB.characters[charKey] = char
+    end
+    -- Fights saved before this were account-wide, with no record of the character. Hand them to the first
+    -- character that logs in (each client keeps its own saved variables, so that's usually the main one).
+    if ManaMasterDB.fights then
+        char.fights = char.fights or ManaMasterDB.fights
+        char.normalCosts = char.normalCosts or ManaMasterDB.normalCosts
+        ManaMasterDB.fights, ManaMasterDB.normalCosts = nil, nil
+    end
+    char.fights = char.fights or {}
+    char.normalCosts = char.normalCosts or {} -- learned per spell ID, for mana saved
     ns.db = ManaMasterDB
+    ns.char = char
+    ns.charName = UnitName("player")
     ns.CreateMinimapButton()
     ns.Mana.Init()
 
@@ -948,7 +966,7 @@ frame:RegisterUnitEvent("UNIT_AURA", "player")
 frame:RegisterUnitEvent("UNIT_MAXPOWER", "player")
 
 function ns.ClearHistory()
-    wipe(ns.db.fights)
+    wipe(ns.char.fights)
     print(PREFIX .. "fight history cleared")
     ns.RefreshHistory()
 end
@@ -963,7 +981,7 @@ SlashCmdList.MANAMASTER = function(msg)
         ns.db.enabled = not ns.db.enabled
         print(PREFIX .. (ns.db.enabled and "enabled" or "disabled"))
     elseif msg == "last" then
-        local fights = ns.db.fights
+        local fights = ns.char.fights
         if #fights > 0 then
             PrintSummary(fights[#fights])
         else

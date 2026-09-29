@@ -55,7 +55,7 @@ local function ResultText(fight)
 end
 
 local function IndexOf(fight)
-    for i, f in ipairs(ns.db.fights) do
+    for i, f in ipairs(ns.char.fights) do
         if f == fight then return i end
     end
 end
@@ -63,7 +63,7 @@ end
 -- Selected fights in history order (oldest first).
 local function SelectedFights()
     local list = {}
-    for _, fight in ipairs(ns.db.fights) do
+    for _, fight in ipairs(ns.char.fights) do
         if selected[fight] then table.insert(list, fight) end
     end
     return list
@@ -80,7 +80,7 @@ local function OnRowClick(fight)
         local from, to = IndexOf(selectionAnchor), IndexOf(fight)
         if from > to then from, to = to, from end
         wipe(selected)
-        for i = from, to do selected[ns.db.fights[i]] = true end
+        for i = from, to do selected[ns.char.fights[i]] = true end
         -- The anchor stays put, so further Shift+clicks extend from the same fight.
     elseif IsControlKeyDown() then
         selected[fight] = not selected[fight] or nil
@@ -95,7 +95,7 @@ end
 -- Deletes fights from history. If the selection ends up empty, it moves to the next older fight after
 -- the deleted ones (the next row down in the list), or the newest.
 local function DeleteFights(targets)
-    local fights = ns.db.fights
+    local fights = ns.char.fights
     local lowest
     for _, target in ipairs(targets) do
         local i = IndexOf(target)
@@ -826,7 +826,7 @@ end
 -- fight ends while it's open so the new segment is shown straight away. Does nothing while it's closed.
 function ns.ShowNewestFight()
     if not panel or not panel:IsShown() then return end
-    local fights = ns.db.fights
+    local fights = ns.char.fights
     SelectOnly(fights[#fights])
     animateBars = true
     listScroll:SetVerticalScroll(0)
@@ -836,7 +836,7 @@ end
 
 function ns.RefreshHistory()
     if not panel or not panel:IsShown() then return end
-    local fights = ns.db.fights
+    local fights = ns.char.fights
 
     -- Drop selected fights that were pruned or deleted; fall back to the newest if nothing is left.
     local present = {}
@@ -946,7 +946,7 @@ local function CreatePanel()
     panel:SetScript("OnDragStart", panel.StartMoving)
     panel:SetScript("OnDragStop", panel.StopMovingOrSizing)
     panel:Hide()
-    panel.TitleText:SetText("ManaMaster - Fight History")
+    panel.TitleText:SetText("ManaMaster - Fight History - " .. (ns.charName or "")) -- fights are per character
     tinsert(UISpecialFrames, panel:GetName()) -- close with Escape
 
     -- Widths are set by UpdateLayout once everything exists.
@@ -991,7 +991,7 @@ local function CreatePanel()
     clearButton:SetPoint("BOTTOMLEFT", 12, 12)
     clearButton:SetText("Clear history")
     clearButton:SetScript("OnClick", function()
-        StaticPopup_Show("MANAMASTER_CLEAR_HISTORY", #ns.db.fights)
+        StaticPopup_Show("MANAMASTER_CLEAR_HISTORY", #ns.char.fights)
     end)
 
     deleteButton = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
