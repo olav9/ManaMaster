@@ -55,6 +55,10 @@ local defaults = {
     showMinimapButton = true,
     minimapAngle = 225, -- bottom-left of the minimap
     maxFights = DEFAULT_MAX_FIGHTS,
+    -- Details! integration (DetailsPlugin.lua): delete fights whose Details segment was removed, and what
+    -- to do when Details' data is reset: "ask", "clear" or "keep".
+    detailsMirrorRemovals = true,
+    detailsResetAction = "ask",
 }
 
 local frame = CreateFrame("Frame")

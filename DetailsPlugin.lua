@@ -171,6 +171,95 @@ local function OverallFights(combat)
     return result
 end
 
+------------------------------------------------------------------------------------------------------------
+-- Keeping the history in step with Details' segments.
+-- DETAILS_DATA_SEGMENTREMOVED says segments were removed but not which (Details trims beyond its segment
+-- limit, 25 by default, resets Overall or a combat type, or collects destroyed ones). So fights are marked
+-- fight.detailsMatched once a Details segment overlaps them, and on removal a marked fight that no longer
+-- overlaps any segment is deleted. Fights Details never recorded (very short, before it was installed) are
+-- never marked, so they're never deleted. A full reset (DETAILS_DATA_RESET) asks instead.
+-- Settings: ManaMasterDB.detailsMirrorRemovals (true/false), detailsResetAction ("ask", "clear", "keep").
+
+-- Whether a saved fight overlaps a Details combat: by game clock, confirmed by time of day where both
+-- exist (the game clock restarts with the computer, so an old segment could collide with a new fight).
+local function FightInCombat(fight, combat)
+    local okStart, gameStart = pcall(combat.GetStartTime, combat)
+    local okEnd, gameEnd = pcall(combat.GetEndTime, combat)
+    local okDate, dateStart, dateEnd = pcall(combat.GetDate, combat)
+    local dayStart = okDate and ClockSeconds(dateStart)
+    local dayEnd = okDate and ClockSeconds(dateEnd) or dayStart
+    local fightDayStart, fightDayEnd = FightSpan(fight, "day")
+    local dayMatch = dayStart and fightDayStart and Overlaps(fightDayStart, fightDayEnd, dayStart, dayEnd)
+
+    local fightStart, fightEnd = FightSpan(fight, "game")
+    if okStart and okEnd and (gameStart or 0) > 0 and (gameEnd or 0) > 0 and fightStart then
+        return Overlaps(fightStart, fightEnd, gameStart, gameEnd) and (dayMatch or not dayStart)
+    end
+    return dayMatch or false
+end
+
+local function InAnySegment(fight, segments)
+    for _, combat in ipairs(segments) do
+        if FightInCombat(fight, combat) then return true end
+    end
+    return false
+end
+
+local function DetailsSegments()
+    local ok, segments = pcall(Details.GetCombatSegments, Details)
+    return ok and type(segments) == "table" and segments or {}
+end
+
+-- Marks saved fights that a Details segment overlaps. Run after Details finishes a fight, and at login.
+local function MarkDetailsMatches()
+    if not (ns.char and ns.char.fights) then return end
+    local segments = DetailsSegments()
+    for _, fight in ipairs(ns.char.fights) do
+        if not fight.detailsMatched and InAnySegment(fight, segments) then fight.detailsMatched = true end
+    end
+end
+
+-- Details removed segments: delete the marked fights that lost theirs.
+local function MirrorRemovals()
+    if not (ns.char and ns.char.fights) or ns.db.detailsMirrorRemovals == false then return end
+    local segments = DetailsSegments()
+    local removed = {}
+    for _, fight in ipairs(ns.char.fights) do
+        if fight.detailsMatched and not InAnySegment(fight, segments) then table.insert(removed, fight) end
+    end
+    if #removed > 0 then
+        ns.Debug("details removed segments: deleting", #removed, "fights to match")
+        ns.DeleteFights(removed)
+    end
+end
+
+StaticPopupDialogs["MANAMASTER_DETAILS_RESET"] = {
+    text = "Details! data was reset.\n\nAlso clear ManaMaster's fight history for %s (%d fights)?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function() ns.ClearHistory() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Details' data was reset. The fights are unlinked from Details first (their segments are all gone), so a
+-- later removal can't delete them; then the history is cleared, kept, or the player is asked.
+local lastResetTime
+local function OnDetailsReset()
+    lastResetTime = GetTime()
+    if not (ns.char and ns.char.fights) then return end
+    for _, fight in ipairs(ns.char.fights) do fight.detailsMatched = nil end
+    local action = ns.db.detailsResetAction or "ask"
+    ns.Debug("details data reset:", action)
+    if action == "clear" then
+        ns.ClearHistory()
+    elseif action == "ask" and #ns.char.fights > 0 then
+        StaticPopup_Show("MANAMASTER_DETAILS_RESET", ns.charName or "", #ns.char.fights)
+    end
+end
+
 -- The ManaMaster fights that overlap the followed window's selected Details segment. Details' "Overall"
 -- segment spans everything since its last reset, so it matches every fight in that time. Falls back to
 -- DefaultFights when the segment has no usable times (e.g. Details built on Blizzard's meter).
@@ -548,4 +637,22 @@ function plugin:OnEvent(_, event, name)
         "DETAILS_INSTANCE_CHANGESEGMENT" }) do
         Details:RegisterEvent(plugin, detailsEvent)
     end
+
+    -- Keeping the history in step with Details' segments. Through an event listener, not the plugin: Details
+    -- only sends a plugin its events while it's shown in a window, and this has to work regardless.
+    -- Listener callbacks are called as func(event, ...).
+    if Details.CreateEventListener then
+        local listener = Details:CreateEventListener()
+        listener:RegisterEvent("DETAILS_DATA_RESET", OnDetailsReset)
+        listener:RegisterEvent("DETAILS_DATA_SEGMENTREMOVED", function()
+            -- A reset sends this right after DETAILS_DATA_RESET, in the same frame; the reset is handled there.
+            if lastResetTime ~= GetTime() then MirrorRemovals() end
+        end)
+        listener:RegisterEvent("COMBAT_PLAYER_LEAVE", function()
+            -- Details finished a fight; ours ends at the same moment, so link them once both are saved.
+            C_Timer.After(2, MarkDetailsMatches)
+        end)
+    end
+    -- Link the saved fights to Details' segments once both have loaded.
+    C_Timer.After(5, MarkDetailsMatches)
 end

@@ -120,6 +120,7 @@ local function DeleteFights(targets)
     animateBars = true
     ns.RefreshHistory()
 end
+ns.DeleteFights = DeleteFights -- also used by the Details plugin to mirror Details' removed segments
 
 -- Adds per-spell entry tables together (fight.spells, gains, drains), keyed the same way.
 local function MergeEntries(target, source)
