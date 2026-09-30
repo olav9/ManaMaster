@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: ManaMaster
 ## Notes: Mana tracking and management
-## Author: olsen
+## Author: olav9
 ## Version: 0.2.2
 ## SavedVariables: ManaMasterDB
 ## OptionalDeps: Details

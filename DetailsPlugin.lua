@@ -537,7 +537,7 @@ function plugin:OnEvent(_, event, name)
     if event ~= "ADDON_LOADED" or name ~= FRAME_NAME then return end
 
     local version = C_AddOns and C_AddOns.GetAddOnMetadata(addonName, "Version") or "v0.1"
-    local installed = Details:InstallPlugin("RAID", PLUGIN_NAME, PLUGIN_ICON, plugin, PLUGIN_ID, 1, "olsen", version)
+    local installed = Details:InstallPlugin("RAID", PLUGIN_NAME, PLUGIN_ICON, plugin, PLUGIN_ID, 1, "olav9", version)
     if type(installed) == "table" and installed.error then
         print(ns.PREFIX .. "Details plugin: " .. tostring(installed.error))
         return
