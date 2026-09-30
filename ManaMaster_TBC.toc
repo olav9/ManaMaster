@@ -7,6 +7,7 @@
 ## OptionalDeps: Details
 ## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
 ## X-Source: https://github.com/olav9/ManaMaster
+## X-Curse-Project-ID: 1718932
 
 ManaMaster.lua
 Mana_TBC.lua

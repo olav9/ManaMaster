@@ -41,6 +41,13 @@ for toc in ManaMaster_TBC.toc ManaMaster_Vanilla.toc; do
     [ "$(normalized "$toc")" = "$base" ] || fail "$toc: headers or file list differ from ManaMaster.toc"
 done
 
+# The packager uploads to CurseForge using this project ID (the same in every TOC, checked above).
+curse_id=$(sed -n 's/^## X-Curse-Project-ID: *//p' ManaMaster.toc | tr -d '\r')
+case "$curse_id" in
+    '') ;; # no CurseForge upload
+    *[!0-9]*) fail "ManaMaster.toc: ## X-Curse-Project-ID must be a number: '$curse_id'" ;;
+esac
+
 # The version comes from the release tag (the packager replaces @project-version@).
 for toc in ManaMaster*.toc; do
     grep -qx '## Version: @project-version@' "$toc" || fail "$toc: ## Version must be @project-version@"

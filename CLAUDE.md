@@ -233,7 +233,8 @@ The repo is `github.com/olav9/ManaMaster`. Releases are packaged by GitHub Actio
   1. Add a `## vX.Y.Z` section to `CHANGELOG.md` and commit.
   2. Tag `vX.Y.Z`.
   3. Push the commit and the tag.
-- The TOCs carry `## X-Source: https://github.com/olav9/ManaMaster`.
+- The TOCs carry `## X-Source: https://github.com/olav9/ManaMaster` and `## X-Curse-Project-ID: 1718932`; `check.sh` checks it's a number. No Wago project yet.
+- The first CI run (the push of the workflows) passed every step: Lua syntax of all files, TOC checks, trial package and zip contents.
 
 ## Testing
 
