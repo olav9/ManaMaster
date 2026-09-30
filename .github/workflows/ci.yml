@@ -24,7 +24,7 @@ jobs:
 
       # Builds the package the way a release would, without uploading anything.
       - name: Preflight package
-        uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        uses: BigWigsMods/packager@e50a250f8705041e40f2fa1ddcb280a686d65aa0 # v2.6.1 (WoW Forever support)
         with:
           args: -d
 

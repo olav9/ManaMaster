@@ -27,7 +27,7 @@ check_interface() {
     actual=$(sed -n 's/^## Interface: *//p' "$toc" | tr -d '\r')
     [ "$actual" = "$expected" ] || fail "$toc: ## Interface is '$actual', expected $expected"
 }
-check_interface ManaMaster.toc 16001         # WoW Forever
+check_interface ManaMaster_Camelot.toc 16001         # WoW Forever
 check_interface ManaMaster_TBC.toc 20506     # TBC Anniversary
 check_interface ManaMaster_Vanilla.toc 11509 # Classic Era
 
@@ -36,16 +36,16 @@ check_interface ManaMaster_Vanilla.toc 11509 # Classic Era
 normalized() {
     tr -d '\r' < "$1" | sed -e '/^## Interface:/d' -e 's/^Mana_\(Forever\|TBC\)\.lua$/Mana_<client>.lua/'
 }
-base=$(normalized ManaMaster.toc)
+base=$(normalized ManaMaster_Camelot.toc)
 for toc in ManaMaster_TBC.toc ManaMaster_Vanilla.toc; do
-    [ "$(normalized "$toc")" = "$base" ] || fail "$toc: headers or file list differ from ManaMaster.toc"
+    [ "$(normalized "$toc")" = "$base" ] || fail "$toc: headers or file list differ from ManaMaster_Camelot.toc"
 done
 
 # The packager uploads to CurseForge using this project ID (the same in every TOC, checked above).
-curse_id=$(sed -n 's/^## X-Curse-Project-ID: *//p' ManaMaster.toc | tr -d '\r')
+curse_id=$(sed -n 's/^## X-Curse-Project-ID: *//p' ManaMaster_Camelot.toc | tr -d '\r')
 case "$curse_id" in
     '') ;; # no CurseForge upload
-    *[!0-9]*) fail "ManaMaster.toc: ## X-Curse-Project-ID must be a number: '$curse_id'" ;;
+    *[!0-9]*) fail "ManaMaster_Camelot.toc: ## X-Curse-Project-ID must be a number: '$curse_id'" ;;
 esac
 
 # The version comes from the release tag (the packager replaces @project-version@).
@@ -59,8 +59,8 @@ done
 
 # WoW Forever must never load the combat log file: registering the combat log there triggers the
 # "blocked from an action" pop-up.
-grep -qx 'Mana_TBC.lua' ManaMaster.toc && fail "ManaMaster.toc (WoW Forever) must not load Mana_TBC.lua"
-grep -qx 'Mana_Forever.lua' ManaMaster.toc || fail "ManaMaster.toc (WoW Forever) must load Mana_Forever.lua"
+grep -qx 'Mana_TBC.lua' ManaMaster_Camelot.toc && fail "ManaMaster_Camelot.toc (WoW Forever) must not load Mana_TBC.lua"
+grep -qx 'Mana_Forever.lua' ManaMaster_Camelot.toc || fail "ManaMaster_Camelot.toc (WoW Forever) must load Mana_Forever.lua"
 
 # --- Release tag ----------------------------------------------------------------------------------------
 # The packager only treats a version as a prerelease if it contains "alpha" or "beta".

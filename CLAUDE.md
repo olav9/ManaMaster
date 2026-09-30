@@ -6,13 +6,13 @@ ManaMaster is a World of Warcraft addon for mana tracking and management.
 
 - The addon targets **World of Warcraft: Forever**, a new version of WoW.
 - WoW Forever uses the **current retail WoW API**. Write code against retail APIs, not Classic APIs.
-- The client reports interface/build **16001**. Keep `## Interface: 16001` in `ManaMaster.toc`. This is correct even though it doesn't follow the usual 6-digit retail format.
+- The client reports interface/build **16001**. Keep `## Interface: 16001` in `ManaMaster_Camelot.toc`. This is correct even though it doesn't follow the usual 6-digit retail format.
 
 ## Structure
 
 One codebase serves several clients. Each client gets its own TOC, which loads the shared files plus that client's mana file.
 
-- `ManaMaster.toc`: addon manifest for WoW Forever (interface 16001). SavedVariables: `ManaMasterDB`. Loads `ManaMaster.lua`, `Mana_Forever.lua`, `HistoryPanel.lua`, `MeterWindow.lua`, `MinimapButton.lua` and `DetailsPlugin.lua`.
+- `ManaMaster_Camelot.toc`: addon manifest for WoW Forever (interface 16001). Named with the `_Camelot` suffix like Details' `Details_Camelot.toc`, which the Forever client loads (confirmed in game); there is no plain `ManaMaster.toc`, so the retail client doesn't load the addon. The BigWigs packager only knows the `_Camelot` suffix, and the `forever` game type (interface 16???), from **v2.6.0** (2026-09-18). With v2.5.1 the v0.2.4-beta1 upload reached CurseForge without WoW Forever as a game version. The workflows pin v2.6.1. `validate-package.sh` also checks that every packaged TOC had its `@project-version@` filled in. The package name still comes out as `ManaMaster`: the packager takes the shortest TOC name and strips known suffixes. SavedVariables: `ManaMasterDB`. Loads `ManaMaster.lua`, `Mana_Forever.lua`, `HistoryPanel.lua`, `MeterWindow.lua`, `MinimapButton.lua` and `DetailsPlugin.lua`.
 - `ManaMaster.lua`: shared core: fight lifecycle and naming, per-spell spending from casts, pre-combat casts, buff uptime (`REGEN_BUFFS`, `ScanAuras`), readable-mana delta tracking, history, the on-screen display and mana bar, the chat summary, events, and the slash commands `/mm` and `/manamaster`. It exposes helpers and state through the addon namespace `ns`: `ns.current` is the running fight, and `ns.debugMode`, `ns.Debug`, `ns.IsReadable` and others are shared helpers. It calls the client's `ns.Mana.*` hooks, documented at the top of the file.
 - `Mana_Forever.lua`: the WoW Forever implementation of `ns.Mana`: the estimated mana pool, the regen and five-second rule, full-mana detection, potion estimates (`KNOWN_MANA_RESTORES`) and regen blockers (`REGEN_BLOCKERS`). Everything that exists because mana is secret there.
 - `ManaMaster_TBC.toc`: manifest for TBC Anniversary (interface **20506**, confirmed in game with `/dump select(4, GetBuildInfo())`). The TBC client prefers a `_TBC` TOC over the plain one, as Details does with `Details_TBC.toc`. Loads `ManaMaster.lua`, `Mana_TBC.lua`, `HistoryPanel.lua`, `MeterWindow.lua`, `MinimapButton.lua` and `DetailsPlugin.lua`.
@@ -200,7 +200,7 @@ Notes from the experiment:
 
 ## Releases and CI
 
-The repo is `github.com/olav9/ManaMaster`. Releases are packaged by GitHub Actions with the BigWigs packager (`BigWigsMods/packager`), as Details and the user's wow-markets repo do. That replaces CurseForge's webhook, and one tag push publishes to CurseForge, Wago and GitHub Releases. Actions are pinned to commit SHAs, the same pins as wow-markets.
+The repo is `github.com/olav9/ManaMaster`. Releases are packaged by GitHub Actions with the BigWigs packager (`BigWigsMods/packager`), as Details and the user's wow-markets repo do. That replaces CurseForge's webhook, and one tag push publishes to CurseForge, Wago and GitHub Releases. Actions are pinned to commit SHAs: checkout as in wow-markets, the packager at v2.6.1 (the first versions with WoW Forever support).
 
 - **CI** (`.github/workflows/ci.yml`, on pushes to main and pull requests):
   - installs Lua 5.1 and runs `scripts/check.sh`;
@@ -219,7 +219,7 @@ The repo is `github.com/olav9/ManaMaster`. Releases are packaged by GitHub Actio
   - all TOCs identical apart from `## Interface` and the client's mana file (`Mana_Forever.lua`/`Mana_TBC.lua`);
   - `## Version: @project-version@`;
   - every listed file exists;
-  - `ManaMaster.toc` loads `Mana_Forever.lua` and never `Mana_TBC.lua`.
+  - `ManaMaster_Camelot.toc` loads `Mana_Forever.lua` and never `Mana_TBC.lua`.
   - With a tag, it also checks the format `v1.2.3`, `v1.2.3-beta1` or `v1.2.3-alpha1` (the packager only treats `alpha`/`beta` as prereleases), and that `CHANGELOG.md` has a `## <tag>` section.
   - `make check` runs it (needs sh and Lua 5.1's `luac`).
 - **`scripts/validate-package.sh <zip>`**: the zip must hold exactly the addon's files in a `ManaMaster/` folder: the Lua files, the three TOCs, `CHANGELOG.md` and `LICENSE`. **Add a new addon file to its list**, or CI fails.

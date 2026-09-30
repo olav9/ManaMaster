@@ -17,7 +17,7 @@ printf '%s\n' \
     ManaMaster/HistoryPanel.lua \
     ManaMaster/LICENSE \
     ManaMaster/ManaMaster.lua \
-    ManaMaster/ManaMaster.toc \
+    ManaMaster/ManaMaster_Camelot.toc \
     ManaMaster/ManaMaster_TBC.toc \
     ManaMaster/ManaMaster_Vanilla.toc \
     ManaMaster/Mana_Forever.lua \
@@ -30,4 +30,12 @@ if ! cmp -s "$actual" "$expected"; then
     diff "$expected" "$actual" >&2 || true
     exit 1
 fi
+# The packager must have filled in the version in every TOC. It only knows some TOC suffixes (not
+# _Camelot, WoW Forever's), so check it did for all of them.
+for toc in $(grep '\.toc$' "$actual"); do
+    if unzip -p "$archive" "$toc" | grep -q '@project-version@'; then
+        echo "error: $toc in $archive still has @project-version@" >&2
+        exit 1
+    fi
+done
 echo "package contents valid: $archive"

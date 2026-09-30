@@ -30,7 +30,7 @@ jobs:
 
       # Build and check the package first, so a broken one is never uploaded.
       - name: Build package
-        uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        uses: BigWigsMods/packager@e50a250f8705041e40f2fa1ddcb280a686d65aa0 # v2.6.1 (WoW Forever support)
         with:
           args: -d
 
@@ -46,7 +46,7 @@ jobs:
           sh scripts/validate-package.sh "${archives[0]}"
 
       - name: Package and publish
-        uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        uses: BigWigsMods/packager@e50a250f8705041e40f2fa1ddcb280a686d65aa0 # v2.6.1 (WoW Forever support)
         env:
           CF_API_KEY: ${{ secrets.CF_API_KEY }}
           WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
