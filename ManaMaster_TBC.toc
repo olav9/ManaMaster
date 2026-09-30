@@ -2,10 +2,11 @@
 ## Title: ManaMaster
 ## Notes: Mana tracking and management
 ## Author: olav9
-## Version: 0.2.3
+## Version: @project-version@
 ## SavedVariables: ManaMasterDB
 ## OptionalDeps: Details
 ## IconTexture: Interface\Icons\INV_Elemental_Mote_Mana
+## X-Source: https://github.com/olav9/ManaMaster
 
 ManaMaster.lua
 Mana_TBC.lua

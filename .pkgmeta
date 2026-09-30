@@ -1,0 +1,19 @@
+# Packaging settings for the BigWigs packager, run by .github/workflows/release.yml on a version tag
+# (v1.2.3; a tag containing "beta" or "alpha" makes a prerelease). Same format as CurseForge's packager.
+
+package-as: ManaMaster
+
+# Developer-only files stay out of the package (dot-files and .github are left out automatically).
+# scripts/validate-package.sh checks the result holds exactly the addon's files.
+ignore:
+    - CLAUDE.md
+    - Makefile
+    - scripts
+
+# The Details! plugin is only active when Details is installed.
+optional-dependencies:
+    - details
+
+manual-changelog:
+    filename: CHANGELOG.md
+    markup-type: markdown
