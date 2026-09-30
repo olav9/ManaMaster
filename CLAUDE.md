@@ -93,7 +93,18 @@ Findings, from TBC with a level 70 elemental shaman:
 ## How tracking works
 
 - Mana casts in the 15 seconds before combat starts (`PRECOMBAT_WINDOW`) count toward the fight, which covers pull casts and pre-pull setup such as dropping totems.
-- A fight starts on `PLAYER_REGEN_DISABLED` or `ENCOUNTER_START`. It ends on `PLAYER_REGEN_ENABLED`, or on `ENCOUNTER_END` if a boss encounter is active.
+- A fight starts on `PLAYER_REGEN_DISABLED` or `ENCOUNTER_START`. Details starts at the first combat-log hit instead, which can be seconds later; the combat log isn't available on Forever, and the player's combat flag is the right moment for mana.
+- **It ends the way Details ends a combat.** This was requested to line fights up with Details' segments; see Details' `core/parser.lua` `PLAYER_REGEN_ENABLED` and `functions/util.lua` `combatTicker`.
+  - On `PLAYER_REGEN_ENABLED`, `TryEndFight` ends it right away when solo.
+  - It keeps the fight open (`fightEnding`) while any group member is in combat (`GroupInCombat`, `UnitAffectingCombat` on party/raid units through `pcall`), or while a rogue's Vanish buff is up (`VANISH_BUFFS` 11327/11329/26888).
+  - A 1 s ticker retries until nothing keeps it open. Re-entering combat clears `fightEnding`, and the same fight continues.
+  - Boss encounters still end on `ENCOUNTER_END`, and arenas when the match is decided.
+- **Death:** a group fight can go on after the player dies, but nothing counts while dead.
+  - `OnDeathChanged` (`PLAYER_DEAD`, `PLAYER_ALIVE`, which also fires on becoming a ghost, `PLAYER_UNGHOST`, and `PLAYER_ENTERING_WORLD`) keeps `playerDead` in step with `UnitIsDeadOrGhost`.
+  - Before the state flips, it settles regen: the regen split, and Forever's pool through `ns.Mana.OnDeathChanged`.
+  - While dead: no regen split time (`AccumulateRegenSplit`), no Forever pool regen (`AdvancePool`), no buff uptime (buffs are closed at death, and `UpdateAuras` resumes them after).
+  - Mana and rage/energy changes are followed but not counted (`IgnoringPowerChanges`), and also for `RES_GRACE` (2 s) after coming back to life, so a resurrection's mana isn't counted as recovered.
+  - **Untested in game.**
 - **Arenas** (instance type `"arena"`) are one fight per match. It starts at the first combat and is named "Arena: <zone>". It stays open through `PLAYER_REGEN_ENABLED` (`arenaActive`), so drinking and casts between bursts count toward it. It ends as soon as the match is **decided**, not when the arena closes. Ending on `PVP_MATCH_COMPLETE` alone kept adding passive regen and Water Shield mp5 while the scoreboard was up, seen on TBC.
   - `ArenaMatchDecided` returns true when `GetBattlefieldWinner()` gives a winner (classic API) or `C_PvP.GetActiveMatchState()` is `PostRound`/`Complete` (newer API). Both are optional and called through `pcall`.
   - It's checked on `UPDATE_BATTLEFIELD_STATUS`, `PVP_MATCH_STATE_CHANGED`, `UPDATE_BATTLEFIELD_SCORE` (`ARENA_STATE_EVENTS`, each registered in a `pcall`) and on `PLAYER_REGEN_ENABLED` in an arena.

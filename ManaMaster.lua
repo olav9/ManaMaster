@@ -11,6 +11,8 @@ local addonName, ns = ...
 --   OnPowerEvent(mana)         a mana UNIT_POWER_FREQUENT; mana is the readable value or nil
 --   OnAuras(fight, now)        the player's auras changed during a fight
 --   OnCombatEnd()              the player left combat
+--   OnDeathChanged(dead, now)  optional: the player is about to die or come back to life (the state
+--                              changes right after this call, so regen can be settled up to now)
 
 local MANA = Enum.PowerType.Mana
 -- Fights kept per character: ManaMasterDB.maxFights, set with /mm keep N (a fight is ~2 KB saved).
@@ -67,6 +69,21 @@ local encounterActive = false
 -- (drinking, resetting) until the match ends or the player leaves the arena.
 local arenaActive = false
 local arenaMatchOver = false -- set when the match ends, cleared on leaving the arena
+
+-- Death. A fight in a group can go on after the player dies (it ends when the whole group is out of
+-- combat, see FightShouldContinue), but nothing counts while dead: no regen (Forever's estimate or the
+-- regen split), no mana or rage/energy changes (TBC's measured deltas), no buff uptime. The mana a
+-- resurrection gives back isn't regen either, so changes are ignored for RES_GRACE seconds after coming
+-- back to life. Set from PLAYER_DEAD / PLAYER_ALIVE / PLAYER_UNGHOST (OnDeathChanged).
+local RES_GRACE = 2
+local playerDead = false
+local aliveAt = 0 -- GetTime() when the player last came back to life
+
+-- True while dead, and briefly after a resurrection (see above).
+local function IgnoringPowerChanges()
+    return playerDead or GetTime() - aliveAt < RES_GRACE
+end
+function ns.IsPlayerDead() return playerDead end
 
 local function InArena()
     local _, instanceType = GetInstanceInfo()
@@ -340,6 +357,15 @@ local function OnOtherPowerChanged(token)
             entry.hiddenLogged = true
         end
         entry.hidden = true
+        return
+    end
+    -- While dead (rage and energy reset) and just after a resurrection: follow the value, count nothing.
+    if IgnoringPowerChanges() then
+        if entry.capSince then
+            entry.cappedTime = entry.cappedTime + (GetTime() - entry.capSince)
+            entry.capSince = nil
+        end
+        entry.last = value
         return
     end
     if entry.last then
@@ -910,6 +936,7 @@ local function StillUp(entry, hiddenSlots)
 end
 
 local function UpdateAuras(fight, now)
+    if playerDead then return end -- buff uptime stopped at death (OnDeathChanged) and resumes after
     ns.Mana.OnAuras(fight, now)
 
     -- Listed regen buffs, plus any buff whose description gives mana per 5 sec (e.g. set bonuses).
@@ -959,6 +986,7 @@ end
 local function AccumulateRegenSplit(fight, now)
     local from = fight.splitClock
     fight.splitClock = now
+    if playerDead then return end -- no regen while dead; the dead time counts toward neither window
     if not from or not splitRates or now <= from then return end
     local castingTime = math.max(0, math.min(now, lastSpendTime + FIVE_SECOND_RULE) - from)
     local fullTime = (now - from) - castingTime
@@ -1153,6 +1181,12 @@ local function OnManaChanged()
         return
     end
 
+    -- While dead, and the resurrection's mana just after: follow the value, but count nothing.
+    if IgnoringPowerChanges() then
+        current.lastMana = mana
+        return
+    end
+
     if current.lastMana then
         local delta = mana - current.lastMana
         if delta < 0 then
@@ -1294,6 +1328,105 @@ end
 -- scoreboard the panel kept adding regen and Water Shield mp5 (seen on TBC), which isn't part of the match.
 -- GetBattlefieldWinner (classic API) returns the winning team once decided; C_PvP.GetActiveMatchState
 -- (newer API) moves to PostRound or Complete. Either may be missing on a client, so both are optional.
+------------------------------------------------------------------------------------------------------------
+-- Ending fights the way Details! does (core/parser.lua PLAYER_REGEN_ENABLED, functions/util.lua
+-- combatTicker), so fights line up with its segments:
+--  * solo: the fight ends when the player leaves combat, unless a rogue's Vanish is up;
+--  * in a group: it ends only when no group member is in combat, checked every second
+--    (FIGHT_END_CHECK_INTERVAL), so dying or dropping out early doesn't split the fight.
+-- Boss encounters (ENCOUNTER_END) and arenas (match decided) end the fight their own way, as before.
+local FIGHT_END_CHECK_INTERVAL = 1
+local VANISH_BUFFS = { 11327, 11329, 26888 } -- the buffs of Vanish ranks 1-3
+local fightEnding = false -- the player left combat, but the group or Vanish keeps the fight open
+
+local function Affecting(unit)
+    local ok, inCombat = pcall(UnitAffectingCombat, unit)
+    return ok and inCombat == true
+end
+
+local function GroupInCombat()
+    if IsInRaid() then
+        for i = 1, GetNumGroupMembers() do
+            if Affecting("raid" .. i) then return true end
+        end
+    elseif IsInGroup() then
+        for i = 1, 4 do
+            if UnitExists("party" .. i) and Affecting("party" .. i) then return true end
+        end
+    end
+    return false
+end
+
+local function VanishUp()
+    local _, class = UnitClass("player")
+    if class ~= "ROGUE" or not (C_UnitAuras and C_UnitAuras.GetPlayerAuraBySpellID) then return false end
+    for _, spellID in ipairs(VANISH_BUFFS) do
+        local ok, aura = pcall(C_UnitAuras.GetPlayerAuraBySpellID, spellID)
+        if ok and aura then return true end
+    end
+    return false
+end
+
+-- Whether the running fight should go on although the player left combat, and why.
+local function FightShouldContinue()
+    if Affecting("player") then return true, "back in combat" end
+    if GroupInCombat() then return true, "group still in combat" end
+    if VanishUp() then return true, "Vanish is up" end
+    return false
+end
+
+-- Ends the fight unless something keeps it open; then the ticker below checks again every second.
+local function TryEndFight()
+    local keep, why = FightShouldContinue()
+    if keep then
+        if not fightEnding then Debug("left combat, fight continues:", why) end
+        fightEnding = true
+        return
+    end
+    fightEnding = false
+    EndFight()
+end
+
+C_Timer.NewTicker(FIGHT_END_CHECK_INTERVAL, function()
+    if not fightEnding then return end
+    if not ns.current or encounterActive or arenaActive then
+        fightEnding = false -- ended some other way, or an encounter/arena took over
+        return
+    end
+    TryEndFight()
+end)
+
+-- Death started or ended (PLAYER_DEAD, PLAYER_ALIVE, which also fires on becoming a ghost, and
+-- PLAYER_UNGHOST). Regen is settled up to now under the old state first: the regen split here, the
+-- client's own estimate through ns.Mana.OnDeathChanged. Buff uptime stops at death and resumes after.
+local function OnDeathChanged()
+    local ok, dead = pcall(UnitIsDeadOrGhost, "player")
+    dead = ok and dead == true
+    if dead == playerDead then return end
+    local now = GetTime()
+    local fight = ns.current
+    if fight then AccumulateRegenSplit(fight, now) end
+    if ns.Mana.OnDeathChanged then ns.Mana.OnDeathChanged(dead, now) end
+    playerDead = dead
+
+    if dead then
+        Debug("player died: regen, mana changes and buff uptime paused")
+        for _, entry in pairs(fight and fight.buffs or {}) do
+            if entry.since then
+                entry.uptime = entry.uptime + (now - entry.since)
+                entry.since, entry.auraInstanceID = nil, nil
+            end
+        end
+    else
+        aliveAt = now
+        Debug("player alive: counting resumes in", RES_GRACE, "s")
+        if fight then
+            fight.splitClock = now
+            UpdateAuras(fight, now)
+        end
+    end
+end
+
 local function ArenaMatchDecided()
     if GetBattlefieldWinner then
         local ok, winner = pcall(GetBattlefieldWinner)
@@ -1340,12 +1473,14 @@ frame:SetScript("OnEvent", function(self, event, ...)
         if InArena() and not arenaMatchOver then
             arenaActive = true
         end
+        fightEnding = false -- back in combat: a fight kept open by the group just continues
         StartFight()
     elseif event == "PLAYER_REGEN_ENABLED" then
         -- During a boss encounter, wait for ENCOUNTER_END so dying or a brief drop out of combat doesn't split
-        -- the fight; in an arena, keep the whole match as one fight.
+        -- the fight; in an arena, keep the whole match as one fight. Otherwise end it like Details: now if
+        -- solo, or once the whole group is out of combat (TryEndFight).
         if not encounterActive and not arenaActive then
-            EndFight()
+            TryEndFight()
         elseif arenaActive then
             -- Leaving combat as the last enemy dies: end the match here if it's already decided.
             local decided, how = ArenaMatchDecided()
@@ -1354,7 +1489,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         ns.Mana.OnCombatEnd()
     elseif event == "PVP_MATCH_COMPLETE" then
         EndArenaFight("PVP_MATCH_COMPLETE") -- fallback: comes after the scoreboard's refill
+    elseif event == "PLAYER_DEAD" or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
+        OnDeathChanged()
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
+        if event == "PLAYER_ENTERING_WORLD" then OnDeathChanged() end -- e.g. logged in dead
         if not InArena() then
             -- Left the arena without the match being decided first (e.g. left early). Reset the flag after,
             -- since ending the fight sets it: the next arena match must start a new arena fight.
@@ -1399,6 +1537,9 @@ end)
 frame:RegisterEvent("ADDON_LOADED")
 frame:RegisterEvent("PLAYER_REGEN_DISABLED")
 frame:RegisterEvent("PLAYER_REGEN_ENABLED")
+frame:RegisterEvent("PLAYER_DEAD")
+frame:RegisterEvent("PLAYER_ALIVE")
+frame:RegisterEvent("PLAYER_UNGHOST")
 frame:RegisterEvent("ENCOUNTER_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")

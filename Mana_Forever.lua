@@ -63,6 +63,7 @@ local function AdvancePool(now)
     local from = pool.clock
     pool.clock = now
     if not pool.mana or now <= from then return end
+    if ns.IsPlayerDead() then return end -- no regen while dead (OnDeathChanged settles up to death first)
     local current = ns.current
 
     local buffRate = BuffRegenRate(current)
@@ -342,6 +343,12 @@ function ns.Mana.OnAuras(fight, now)
             end
         end
     end
+end
+
+-- Called as the player dies or comes back to life, before the state changes: settle regen up to now
+-- under the old state (alive regen up to death; nothing for the time spent dead).
+function ns.Mana.OnDeathChanged(dead, now)
+    AdvancePool(now)
 end
 
 function ns.Mana.OnCombatEnd()
