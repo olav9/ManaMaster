@@ -1286,7 +1286,47 @@ local function OnAddonLoaded()
     end
 end
 
+-- Whether the arena match has been decided. The fight ends then, not when the arena closes: during the
+-- scoreboard the panel kept adding regen and Water Shield mp5 (seen on TBC), which isn't part of the match.
+-- GetBattlefieldWinner (classic API) returns the winning team once decided; C_PvP.GetActiveMatchState
+-- (newer API) moves to PostRound or Complete. Either may be missing on a client, so both are optional.
+local function ArenaMatchDecided()
+    if GetBattlefieldWinner then
+        local ok, winner = pcall(GetBattlefieldWinner)
+        if ok and winner ~= nil then return true, "winner " .. tostring(winner) end
+    end
+    if C_PvP and C_PvP.GetActiveMatchState and Enum.PvPMatchState then
+        local ok, state = pcall(C_PvP.GetActiveMatchState)
+        if ok and (state == Enum.PvPMatchState.PostRound or state == Enum.PvPMatchState.Complete) then
+            return true, "match state " .. tostring(state)
+        end
+    end
+    return false
+end
+
+-- Ends the arena fight (once) and stops a new one starting in the post-match wait.
+local function EndArenaFight(reason)
+    if not arenaActive then return end
+    Debug("arena fight ends:", reason)
+    arenaActive = false
+    arenaMatchOver = true
+    EndFight()
+end
+
+-- Events that may mean the match was decided: check, and end the fight if so. Logged in debug mode with
+-- their time, to see which signal comes first on each client.
+local ARENA_STATE_EVENTS = { UPDATE_BATTLEFIELD_STATUS = true, PVP_MATCH_STATE_CHANGED = true,
+    UPDATE_BATTLEFIELD_SCORE = true }
+
 frame:SetScript("OnEvent", function(self, event, ...)
+    if ARENA_STATE_EVENTS[event] then
+        if arenaActive then
+            local decided, how = ArenaMatchDecided()
+            Debug("arena event", event, decided and ("-> decided (" .. how .. ")") or "-> not decided")
+            if decided then EndArenaFight(event .. ", " .. how) end
+        end
+        return
+    end
     if event == "ADDON_LOADED" then
         if ... == addonName then
             OnAddonLoaded()
@@ -1302,22 +1342,20 @@ frame:SetScript("OnEvent", function(self, event, ...)
         -- the fight; in an arena, keep the whole match as one fight.
         if not encounterActive and not arenaActive then
             EndFight()
+        elseif arenaActive then
+            -- Leaving combat as the last enemy dies: end the match here if it's already decided.
+            local decided, how = ArenaMatchDecided()
+            if decided then EndArenaFight("left combat, " .. how) end
         end
         ns.Mana.OnCombatEnd()
     elseif event == "PVP_MATCH_COMPLETE" then
-        if arenaActive then
-            arenaActive = false
-            arenaMatchOver = true -- don't start a new arena fight in the post-match wait
-            EndFight()
-        end
+        EndArenaFight("PVP_MATCH_COMPLETE") -- fallback: comes after the scoreboard's refill
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
         if not InArena() then
+            -- Left the arena without the match being decided first (e.g. left early). Reset the flag after,
+            -- since ending the fight sets it: the next arena match must start a new arena fight.
+            EndArenaFight("left the arena")
             arenaMatchOver = false
-            if arenaActive then
-                -- Left the arena without a match-complete event (e.g. left early).
-                arenaActive = false
-                EndFight()
-            end
         end
     elseif event == "ENCOUNTER_START" then
         local _, encounterName = ...
@@ -1364,6 +1402,9 @@ frame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
 frame:RegisterEvent("PLAYER_ENTERING_WORLD")
 -- Not every client may have this event; registering an unknown event errors, so guard it.
 pcall(frame.RegisterEvent, frame, "PVP_MATCH_COMPLETE")
+for arenaEvent in pairs(ARENA_STATE_EVENTS) do
+    pcall(frame.RegisterEvent, frame, arenaEvent) -- not every client has all of them
+end
 frame:RegisterUnitEvent("UNIT_POWER_FREQUENT", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
 frame:RegisterUnitEvent("UNIT_SPELLCAST_SENT", "player")
