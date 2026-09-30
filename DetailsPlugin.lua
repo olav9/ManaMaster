@@ -27,7 +27,28 @@ plugin.canShow = 0
 local instance -- the Details window the plugin is shown in
 -- The Details window whose segment was changed most recently (this one or another), so choosing a segment in
 -- e.g. the main damage window also switches this plugin. nil means follow the plugin's own window.
+-- Remembered across reloads in ManaMasterDB.detailsFollowWindow (a window id, or false for the plugin's own).
 local followInstance
+
+-- The window to follow when the plugin is shown: the one remembered from last time, else the first enabled
+-- Details window showing normal data (not a plugin, mode 4), else the plugin's own (nil). Without this, a
+-- reload followed the plugin's own window (on the current fight) while the main window was on Overall.
+local function DefaultFollow()
+    local function Usable(inst)
+        return inst and inst ~= instance and inst.IsEnabled and inst:IsEnabled() and inst.modo ~= 4
+    end
+    local saved = ns.db and ns.db.detailsFollowWindow
+    if saved == false then return nil end
+    if saved and Details.GetInstance then
+        local inst = Details:GetInstance(saved)
+        if Usable(inst) then return inst end
+    end
+    if Details.ListInstances then
+        for _, inst in Details:ListInstances() do
+            if Usable(inst) then return inst end
+        end
+    end
+end
 -- True from the moment a fight starts until a segment is chosen or the fight ends: show the live fight, the
 -- way Details jumps to the current segment when combat starts (even if this window wasn't on it).
 local liveOverride = false
@@ -472,7 +493,9 @@ end
 function plugin:OnDetailsEvent(event, ...)
     if event == "SHOW" then
         instance = plugin:GetInstance(plugin.instance_id)
-        followInstance = nil -- start by following this window's own segment
+        followInstance = DefaultFollow()
+        ns.Debug("details follows window", followInstance and followInstance:GetId() or "own",
+            "| segment", (followInstance or instance) and (followInstance or instance):GetSegment())
         SizeChanged()
         StartUpdates()
     elseif event == "DETAILS_INSTANCE_CHANGESEGMENT" then
@@ -480,6 +503,7 @@ function plugin:OnDetailsEvent(event, ...)
         local changedInstance = ...
         if changedInstance then
             followInstance = changedInstance ~= instance and changedInstance or nil
+            if ns.db then ns.db.detailsFollowWindow = followInstance and followInstance:GetId() or false end
             liveOverride = false -- a segment the player chose wins over the live fight
             Update()
         end
