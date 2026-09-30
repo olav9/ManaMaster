@@ -152,7 +152,6 @@ local function CombineFights(fights)
     local all = { recovered = true, regen = true, wastedFull = true, wastedBlocked = true,
         gainsMeasured = true, buffs = true, lowestMana = true, saved = true, regenSplit = true,
         buffRegenAdded = true }
-    local matchRefill = 0
     local zones, zoneList = {}, {}
 
     for _, fight in ipairs(fights) do
@@ -168,7 +167,6 @@ local function CombineFights(fights)
             local pct = fight.lowestMana / fight.maxMana * 100
             combined.lowestMana = math.min(combined.lowestMana or pct, pct)
         end
-        matchRefill = matchRefill + (fight.matchRefill or 0)
         if fight.regenSplit then
             combined.regenSplit = combined.regenSplit
                 or { castingTime = 0, fullTime = 0, castingRegen = 0, fullRegen = 0 }
@@ -236,7 +234,6 @@ local function CombineFights(fights)
     end
     combined.gainsMeasured = all.gainsMeasured or nil
     combined.buffRegenAdded = all.buffRegenAdded or nil
-    combined.matchRefill = matchRefill > 0 and matchRefill or nil
     combined.zone = table.concat(zoneList, ", ")
     for _, power in pairs(combined.powers or {}) do
         if power.hidden then power.gained = nil end
@@ -684,12 +681,8 @@ local function BuildSections(fight, power)
                 description = "Estimated regen lost while a regen-blocking debuff was up." })
         end
     end
-
-    -- The arena's end-of-match refill: shown for completeness, but not mana recovered during the match.
-    if fight.matchRefill then
-        table.insert(gained, { name = "Match-end refill", mana = fight.matchRefill, icon = GAIN_ICON, excluded = true,
-            description = "The arena refills mana as the match ends. Not counted as mana gained." })
-    end
+    -- The arena's end-of-match refill (fight.matchRefill) isn't shown: it's taken out of recovered mana, and
+    -- a row for it wasn't interesting to players.
 
     local sections = {
         { title = "Mana spent", hex = SPEND_HEX, r = ACCENT_R, g = ACCENT_G, b = ACCENT_B, sign = "",

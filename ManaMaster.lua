@@ -1091,7 +1091,7 @@ local function EndFight(success)
     end
 
     -- An arena match refills mana as it ends. If the last gain was that refill, it isn't mana recovered during
-    -- the match: take it out of recovered and keep it as matchRefill, shown greyed out in the panel.
+    -- the match: take it out of recovered and keep it as matchRefill (not shown in the panel).
     local lastGain = fight.lastGain
     fight.lastGain = nil
     if fight.isArena and lastGain and lastGain.toMax and fight.recovered
