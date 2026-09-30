@@ -1,5 +1,10 @@
 # ManaMaster changelog
 
+## v0.2.4-beta1
+
+- First release built and uploaded automatically: the addon is checked, packaged and published to CurseForge from GitHub.
+- No changes to the addon itself since v0.2.3.
+
 ## v0.2.3
 
 - Arena fights end as soon as the match is decided, so regen during the scoreboard no longer counts.
