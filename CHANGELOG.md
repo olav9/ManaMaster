@@ -1,5 +1,10 @@
 # ManaMaster changelog
 
+## v0.2.4-beta2
+
+- WoW Forever is now included in the CurseForge release (it was missing from v0.2.4-beta1).
+- The WoW Forever build is no longer loaded by the retail client.
+
 ## v0.2.4-beta1
 
 - First release built and uploaded automatically: the addon is checked, packaged and published to CurseForge from GitHub.
