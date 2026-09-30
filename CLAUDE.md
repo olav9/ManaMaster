@@ -147,7 +147,7 @@ Findings, from TBC with a level 70 elemental shaman:
 
 ## Rage and energy (0.2.0)
 
-Rage and energy are tracked beside mana, which works exactly as before. Versions: `## Version` in both TOCs; git tags `v0.1.0` (mana only) and `v0.2.0` (rage/energy).
+Rage and energy are tracked beside mana, which works exactly as before. Git tags: `v0.1.0` (mana only) and `v0.2.0` (rage/energy); see Releases for how versions work now.
 
 - **Fights without mana:** `StartFight` used to require max mana > 0, so warriors and rogues never got a fight. Now it only requires a readable max. `fight.primaryPower` is the `UnitPowerType` token at fight start (`"MANA"`, `"RAGE"`, `"ENERGY"`; `"MANA"` if unreadable).
 - **Data:** `fight.powers[token]` (`OTHER_POWERS` in `ManaMaster.lua`: RAGE, ENERGY), created by `PowerEntry` on first use, since a druid can shift mid-fight. Fields: `spent`, `gained`, `castSpent`, `spells` (same shape as `fight.spells`, amounts in `mana`), `gains`, `wasted`, `cappedTime`, `wastedCap`, `hidden`, `max`.
@@ -197,6 +197,43 @@ Notes from the experiment:
   - Details also uses `PLAYER_IN_COMBAT_CHANGED` (arg: inCombat).
   - Details treats secret values as tied to these restrictions, and can error if `Combat` is off but values are still secret. This may explain ManaMaster seeing mana hidden out of combat, if some restriction such as `Map` stays active. Not tested yet.
 - Blizzard damage meter data is secret during combat and becomes readable afterward; Details waits for "secrets to drop" before storing a session. Spell IDs in that data can be secret too, and Details checks with `issecretvalue(spellId)` before comparing them.
+
+## Releases and CI
+
+The repo is `github.com/olav9/ManaMaster`. Releases are packaged by GitHub Actions with the BigWigs packager (`BigWigsMods/packager`), as Details and the user's wow-markets repo do. That replaces CurseForge's webhook, and one tag push publishes to CurseForge, Wago and GitHub Releases. Actions are pinned to commit SHAs, the same pins as wow-markets.
+
+- **CI** (`.github/workflows/ci.yml`, on pushes to main and pull requests):
+  - installs Lua 5.1 and runs `scripts/check.sh`;
+  - builds a trial package (`packager -d`, no upload);
+  - checks the zip with `scripts/validate-package.sh`.
+  - This machine has no Lua, so CI's `luac -p` is the only syntax check the code gets before it reaches the game.
+- **Release** (`.github/workflows/release.yml`, on tags `v*`):
+  1. `scripts/check.sh <tag>`;
+  2. a trial package plus the zip check, so a broken package is never uploaded;
+  3. the real packager run with secrets `CF_API_KEY`, `WAGO_API_TOKEN` and `GITHUB_OAUTH` (the workflow's `GITHUB_TOKEN`, for the GitHub release).
+  - The packager uploads to CurseForge/Wago only when the TOCs have `## X-Curse-Project-ID` / `## X-Wago-ID` and the secret is set; otherwise it skips that site.
+  - The API keys live only in GitHub's repository secrets. Never commit them.
+- **`scripts/check.sh [tag]`**:
+  - `luac -p` on every `.lua` file;
+  - each TOC's `## Interface`: 16001 Forever, 20506 TBC, 11509 Classic Era;
+  - all TOCs identical apart from `## Interface` and the client's mana file (`Mana_Forever.lua`/`Mana_TBC.lua`);
+  - `## Version: @project-version@`;
+  - every listed file exists;
+  - `ManaMaster.toc` loads `Mana_Forever.lua` and never `Mana_TBC.lua`.
+  - With a tag, it also checks the format `v1.2.3`, `v1.2.3-beta1` or `v1.2.3-alpha1` (the packager only treats `alpha`/`beta` as prereleases), and that `CHANGELOG.md` has a `## <tag>` section.
+  - `make check` runs it (needs sh and Lua 5.1's `luac`).
+- **`scripts/validate-package.sh <zip>`**: the zip must hold exactly the addon's files in a `ManaMaster/` folder: the Lua files, the three TOCs, `CHANGELOG.md` and `LICENSE`. **Add a new addon file to its list**, or CI fails.
+- **`.pkgmeta`**:
+  - `package-as: ManaMaster`;
+  - `ignore: CLAUDE.md, Makefile, scripts` (dot-files and `.github` are left out automatically);
+  - `optional-dependencies: details`;
+  - `manual-changelog: CHANGELOG.md` (markdown).
+- **Versions come from the tag.** All TOCs have `## Version: @project-version@`, which the packager replaces with the tag name. From the dev folder the game shows the literal `@project-version@`. There are no version-bump commits anymore; v0.1.0–v0.2.3 had them.
+- **Releasing:**
+  1. Add a `## vX.Y.Z` section to `CHANGELOG.md` and commit.
+  2. Tag `vX.Y.Z`.
+  3. Push the commit and the tag.
+- The TOCs carry `## X-Source: https://github.com/olav9/ManaMaster`.
 
 ## Testing
 

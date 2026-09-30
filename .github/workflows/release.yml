@@ -1,0 +1,53 @@
+name: Release
+
+# A version tag (v1.2.3, or v1.2.3-beta1 / v1.2.3-alpha1 for prereleases) packages the addon and publishes
+# it to CurseForge and Wago (where the TOCs have ## X-Curse-Project-ID / ## X-Wago-ID and the matching
+# secret is set; otherwise that upload is skipped) and as a GitHub release.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # the GitHub release
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Lua 5.1
+        run: sudo apt-get update && sudo apt-get install --yes lua5.1
+
+      - name: Check the addon and the tag
+        run: sh scripts/check.sh "${{ github.ref_name }}"
+
+      # Build and check the package first, so a broken one is never uploaded.
+      - name: Build package
+        uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        with:
+          args: -d
+
+      - name: Validate package contents
+        shell: bash
+        run: |
+          shopt -s nullglob
+          archives=(.release/*.zip)
+          if (( ${#archives[@]} != 1 )); then
+            printf 'expected exactly one package, found %d\n' "${#archives[@]}" >&2
+            exit 1
+          fi
+          sh scripts/validate-package.sh "${archives[0]}"
+
+      - name: Package and publish
+        uses: BigWigsMods/packager@6d50adb6e8517eefef63f4afb16a6518166a6b28 # v2.5.1
+        env:
+          CF_API_KEY: ${{ secrets.CF_API_KEY }}
+          WAGO_API_TOKEN: ${{ secrets.WAGO_API_TOKEN }}
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}
