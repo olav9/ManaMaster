@@ -525,7 +525,7 @@ end
 
 ------------------------------------------------------------------------------------------------------------
 -- Power types. Mana has the full set of sections; rage and energy (fight.powers, see ManaMaster.lua) have
--- spent and gained. The panel shows the fight's main power unless another is picked with the power button.
+-- spent and gained. The panel shows the fight's main power unless another is picked with the power dropdown.
 
 local POWER_LABELS = { MANA = "Mana", RAGE = "Rage", ENERGY = "Energy" }
 local POWER_ORDER = { "MANA", "RAGE", "ENERGY" }
@@ -533,7 +533,7 @@ local POWER_GAIN_ICONS = {
     RAGE = "Interface\\Icons\\Ability_Racial_BloodRage",
     ENERGY = "Interface\\Icons\\INV_Drink_Milk_05", -- Thistle Tea
 }
-local selectedPower -- the power picked with the power button; nil = each fight's main power
+local selectedPower -- the power picked with the power dropdown; nil = each fight's main power
 
 -- The powers a fight has data for, in POWER_ORDER.
 local function PowersOf(fight)
@@ -568,6 +568,13 @@ local function PowerColor(token)
     local color = PowerBarColor and PowerBarColor[token]
     if color then return color.r, color.g, color.b end
     return ACCENT_R, ACCENT_G, ACCENT_B
+end
+
+-- A power's spend colour: mana keeps the panel's spend blue (the game's mana colour is a dark blue), rage and
+-- energy use the game's colours.
+local function SpendColor(token)
+    if token == "MANA" then return ACCENT_R, ACCENT_G, ACCENT_B end
+    return PowerColor(token)
 end
 
 -- Sections for rage or energy: spent per ability, and gained (logged sources, the measured rest, and grey
@@ -726,6 +733,82 @@ local function BuildSections(fight, power)
     return sections
 end
 ns.BuildSections = BuildSections -- also used by the meter window (MeterWindow.lua)
+
+------------------------------------------------------------------------------------------------------------
+-- Resources spent: every power's spending in one bar list, for the meter window and the Details plugin, so a
+-- druid sees mana, rage and energy together. The units differ (a heal costs hundreds of mana, Maul 15 rage),
+-- so each power is its own group with its own colour, total and bar scale.
+
+-- The power to put first: the current form's while the fights include the running one, else the main power
+-- most of the fights started in.
+local function LeadPower(fights)
+    for _, fight in ipairs(fights) do
+        if fight.isLive or fight == ns.current then
+            local _, token = UnitPowerType("player")
+            if ns.IsReadable(token) then return token end
+        end
+    end
+    local counts, best = {}, nil
+    for _, fight in ipairs(fights) do
+        local token = fight.primaryPower
+        if token then
+            counts[token] = (counts[token] or 0) + 1
+            if not best or counts[token] > counts[best] then best = token end
+        end
+    end
+    return best
+end
+
+-- One group per power the fights spent: { token, label, r, g, b, total, entries }, entries most first. The
+-- lead power (LeadPower) comes first, then the rest in POWER_ORDER. With several groups, each entry's
+-- description names its power ("Energy spent"), for tooltips in windows without group headers.
+function ns.SpentGroups(fights)
+    local groups, lead = {}, LeadPower(fights)
+    for _, token in ipairs(POWER_ORDER) do
+        local merged = {}
+        for _, fight in ipairs(fights) do
+            local power = fight.powers and fight.powers[token]
+            MergeEntries(merged, token == "MANA" and fight.spells or (power and power.spells))
+        end
+        local entries, total = ns.SortedEntries(merged), 0
+        for _, entry in ipairs(entries) do total = total + entry.mana end
+        if total > 0 then
+            local r, g, b = SpendColor(token)
+            local group = { token = token, label = POWER_LABELS[token], r = r, g = g, b = b, total = total,
+                entries = entries }
+            table.insert(groups, token == lead and 1 or #groups + 1, group)
+        end
+    end
+    if #groups > 1 then
+        for _, group in ipairs(groups) do
+            for _, entry in ipairs(group.entries) do entry.description = group.label .. " spent" end
+        end
+    end
+    return groups
+end
+
+-- The groups as a list of rows that fits `capacity`: { header = true, group } (if withHeaders) and
+-- { entry, group }. When they don't all fit, rows are handed out a group at a time in turn, so one power's
+-- long list can't push the others out of a small window.
+function ns.SpentRows(groups, capacity, withHeaders)
+    local quota, left = {}, capacity - (withHeaders and #groups or 0)
+    for i in ipairs(groups) do quota[i] = 0 end
+    local added = true
+    while left > 0 and added do
+        added = false
+        for i, group in ipairs(groups) do
+            if left > 0 and quota[i] < #group.entries then
+                quota[i], left, added = quota[i] + 1, left - 1, true
+            end
+        end
+    end
+    local list = {}
+    for i, group in ipairs(groups) do
+        if withHeaders then table.insert(list, { header = true, group = group }) end
+        for j = 1, quota[i] do table.insert(list, { entry = group.entries[j], group = group }) end
+    end
+    return list
+end
 
 -- Compact text for bar windows (meter window, Details plugin), which have no room for the panel's context
 -- text: the name, plus the mp5 for regen rows. Rank and the rest are in the tooltip.
@@ -948,9 +1031,100 @@ local function ShowSections(fight, power)
     return y
 end
 
+-- Power selector: a dropdown at the top right of the details pane for fights with more than one power (a
+-- druid's), like the meter window's section picker: the shown power's name in white with a colour swatch,
+-- and a down arrow; clicking opens a small menu of the fight's powers. The pick sticks across fights;
+-- fights without that power show their main one.
+local POWER_SELECT_HEIGHT = 18
+local POWER_MENU_ITEM_HEIGHT = 18
+local SWATCH_SIZE = 8
+
+local function AddSwatch(owner)
+    local swatch = owner:CreateTexture(nil, "ARTWORK")
+    swatch:SetSize(SWATCH_SIZE, SWATCH_SIZE)
+    swatch:SetPoint("LEFT", 6, 0)
+    return swatch
+end
+
+local function CreatePowerSelect()
+    local picker = CreateFrame("Button", nil, detailContent)
+    picker:SetHeight(POWER_SELECT_HEIGHT)
+    picker:SetPoint("TOPRIGHT", 0, 0)
+    picker:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+    picker.swatch = AddSwatch(picker)
+    picker.text = picker:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    picker.text:SetPoint("LEFT", picker.swatch, "RIGHT", 5, 0)
+    picker.arrow = picker:CreateTexture(nil, "OVERLAY")
+    picker.arrow:SetSize(10, 10)
+    picker.arrow:SetTexture("Interface\\ChatFrame\\ChatFrameExpandArrow")
+    picker.arrow:SetRotation(-math.pi / 2) -- point down: "click for a menu"
+    picker.arrow:SetPoint("LEFT", picker.text, "RIGHT", 3, 0)
+    picker:Hide()
+
+    -- Parented to the panel, not the scrolling details pane, which would clip it.
+    local menu = CreateFrame("Frame", nil, panel, "BackdropTemplate")
+    menu:SetBackdrop({ bgFile = "Interface\\Buttons\\WHITE8x8", edgeFile = "Interface\\Buttons\\WHITE8x8",
+        edgeSize = 1 })
+    menu:SetBackdropColor(0.05, 0.05, 0.05, 0.95)
+    menu:SetBackdropBorderColor(0, 0, 0, 1)
+    menu:SetPoint("TOPRIGHT", picker, "BOTTOMRIGHT", 0, -1)
+    menu:SetFrameStrata("DIALOG")
+    menu:SetWidth(100)
+    menu:Hide()
+    menu.items = {}
+    for i = 1, #POWER_ORDER do
+        local item = CreateFrame("Button", nil, menu)
+        item:SetHeight(POWER_MENU_ITEM_HEIGHT)
+        item:SetPoint("TOPLEFT", 2, -2 - (i - 1) * POWER_MENU_ITEM_HEIGHT)
+        item:SetPoint("TOPRIGHT", -2, -2 - (i - 1) * POWER_MENU_ITEM_HEIGHT)
+        item:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+        item.swatch = AddSwatch(item)
+        item.text = item:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+        item.text:SetPoint("LEFT", item.swatch, "RIGHT", 5, 0)
+        item:SetScript("OnClick", function(self)
+            menu:Hide()
+            selectedPower = self.token
+            animateBars = true
+            ns.RefreshHistory()
+        end)
+        menu.items[i] = item
+    end
+    picker:SetScript("OnClick", function() menu:SetShown(not menu:IsShown()) end)
+    picker:SetScript("OnHide", function() menu:Hide() end)
+    picker.menu = menu
+    detail.powerSelect = picker
+end
+
+-- Shows the selector for the fight's powers (hidden with fewer than two), with `power` as the shown one.
+local function UpdatePowerSelect(powers, power)
+    local picker = detail.powerSelect
+    if #powers < 2 then
+        picker:Hide()
+        return
+    end
+    picker.swatch:SetColorTexture(SpendColor(power))
+    picker.text:SetText(POWER_LABELS[power] or power)
+    picker:SetWidth(6 + SWATCH_SIZE + 5 + picker.text:GetStringWidth() + 3 + 10 + 6)
+    local menu = picker.menu
+    for i, item in ipairs(menu.items) do
+        local token = powers[i]
+        item.token = token
+        if token then
+            item.swatch:SetColorTexture(SpendColor(token))
+            -- The shown power in gold, as in the meter window's menu.
+            item.text:SetText((token == power and "|cffffd100" or "") .. (POWER_LABELS[token] or token))
+            item:Show()
+        else
+            item:Hide()
+        end
+    end
+    menu:SetHeight(#powers * POWER_MENU_ITEM_HEIGHT + 4)
+    picker:Show()
+end
+
 local function ShowDetail(fight)
     if not fight then
-        detail.powerButton:Hide()
+        UpdatePowerSelect({})
         detail.title:SetText("No fights recorded yet.")
         detail.info:SetText("")
         detail.sections:Hide()
@@ -985,17 +1159,7 @@ local function ShowDetail(fight)
     detail.info:SetText(table.concat(parts, "  ·  "))
 
     detail.sections:Show()
-    -- The power button cycles through the fight's powers; it's only shown when there's more than one.
-    local powers = PowersOf(fight)
-    if #powers > 1 then
-        local r, g, b = PowerColor(power)
-        detail.powerButton:SetText(string.format("|cff%02x%02x%02x%s|r", r * 255, g * 255, b * 255,
-            POWER_LABELS[power] or power))
-        detail.powerButton.powers, detail.powerButton.power = powers, power
-        detail.powerButton:Show()
-    else
-        detail.powerButton:Hide()
-    end
+    UpdatePowerSelect(PowersOf(fight), power)
 
     local sectionsHeight = ShowSections(fight, power)
 
@@ -1221,24 +1385,10 @@ local function CreatePanel()
     detail = {}
     detail.title = detailContent:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
     detail.title:SetPoint("TOPLEFT")
-    detail.title:SetPoint("TOPRIGHT", -80, 0) -- room for the power button
+    detail.title:SetPoint("TOPRIGHT", -90, 0) -- room for the power selector
     detail.title:SetJustifyH("LEFT")
 
-    -- Cycles the shown power (Mana / Rage / Energy) for fights with more than one, e.g. a druid's.
-    -- The pick sticks across fights; fights without that power show their main one.
-    detail.powerButton = CreateFrame("Button", nil, detailContent, "UIPanelButtonTemplate")
-    detail.powerButton:SetSize(72, 20)
-    detail.powerButton:SetPoint("TOPRIGHT", 0, 2)
-    detail.powerButton:SetScript("OnClick", function(self)
-        local powers, index = self.powers or {}, 1
-        for i, token in ipairs(powers) do
-            if token == self.power then index = i end
-        end
-        selectedPower = powers[index % #powers + 1]
-        animateBars = true
-        ns.RefreshHistory()
-    end)
-    detail.powerButton:Hide()
+    CreatePowerSelect()
 
     detail.info = detailContent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     detail.info:SetPoint("TOPLEFT", detail.title, "BOTTOMLEFT", 0, -4)

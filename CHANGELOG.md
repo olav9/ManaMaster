@@ -1,5 +1,15 @@
 # ManaMaster changelog
 
+## v0.2.4
+
+- Druids: the meter window has a "Resources spent" section showing mana, rage and energy together, each in its own colour with its own scale.
+- The Details plugin shows every resource spent, coloured by resource. Overall segments that mix caster and cat fights no longer add mana and energy into the same bars.
+- Clicking a rage, energy or mana bar opens the history panel on that resource.
+- History panel: the resource button is now a dropdown.
+- Fights end the way Details ends a combat, so they line up with Details' segments: a fight stays open while your group is still fighting, or while Vanish is up.
+- Nothing is counted while you're dead, and a resurrection's mana isn't counted as recovered.
+- A fight stays open while you can still be resurrected (soulstone, Ankh, a battle resurrection on offer).
+
 ## v0.2.4-beta2
 
 - WoW Forever is now included in the CurseForge release (it was missing from v0.2.4-beta1).

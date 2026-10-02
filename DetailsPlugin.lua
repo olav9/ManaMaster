@@ -1,7 +1,7 @@
 local addonName, ns = ...
 
--- Details! plugin: shows ManaMaster's resource spent per spell inside a Details window: mana, or rage or energy
--- for fights whose main power is one of those, e.g. a warrior's or a rogue's. It's a "RAID" plugin
+-- Details! plugin: shows ManaMaster's resource spent per spell inside a Details window: mana, rage and energy,
+-- each power in its own colour (a druid's fights can have all three). It's a "RAID" plugin
 -- (like Details' own Tiny Threat): picked from the plugin menu (orange cogwheel), it takes over the window
 -- and draws its own bars with the window's row style. It shows the running fight live, or the last fight
 -- when out of combat. Only active when Details is loaded (an optional dependency in the TOCs).
@@ -14,7 +14,6 @@ local PLUGIN_ID = "DETAILS_PLUGIN_MANAMASTER" -- Details' absolute plugin name; 
 local FRAME_NAME = "Details_ManaMaster"
 local PLUGIN_ICON = "Interface\\Icons\\INV_Elemental_Mote_Mana"
 local UPDATE_INTERVAL = 0.5 -- seconds between refreshes while the plugin is shown
-local BAR_R, BAR_G, BAR_B = 0.25, 0.66, 0.96 -- the history panel's Mana spent blue
 local UNKNOWN_ICON = 134400
 local ICON_COORDS = { 0.08, 0.92, 0.08, 0.92 }
 
@@ -343,48 +342,6 @@ local function FightsForSegment()
     return matched
 end
 
--- A fight's per-spell spending in its main power: rage for a warrior, energy for a rogue, else mana.
--- Returns the spells table and the power token.
-local function PowerSpells(fight)
-    local token = fight.primaryPower
-    local entry = token and token ~= "MANA" and fight.powers and fight.powers[token]
-    if entry then return entry.spells, token end
-    return fight.spells, "MANA"
-end
-
--- Per-spell spending of several fights added together, most first. Also returns the power shown: the
--- first fight's, or nil if the fights spent different powers.
-local function MergedSpells(fights)
-    local shownPower
-    for i, fight in ipairs(fights) do
-        local _, token = PowerSpells(fight)
-        if i == 1 then shownPower = token elseif token ~= shownPower then shownPower = nil end
-    end
-    if #fights == 1 then return ns.SortedEntries((PowerSpells(fights[1]))), shownPower end
-    local merged = {}
-    for _, fight in ipairs(fights) do
-        for key, data in pairs(PowerSpells(fight) or {}) do
-            local entry = merged[key]
-            if not entry then
-                entry = { casts = 0, mana = 0, spellID = data.spellID, name = data.name or key, rank = data.rank }
-                merged[key] = entry
-            end
-            entry.casts = entry.casts + (data.casts or 0)
-            entry.mana = entry.mana + (data.mana or 0)
-        end
-    end
-    return ns.SortedEntries(merged), shownPower
-end
-
-local POWER_LABELS = { MANA = "mana", RAGE = "rage", ENERGY = "energy" }
-
--- Bar colour per power: mana keeps the history panel's blue, rage and energy use the game's power colours.
-local function BarColor(token)
-    local color = token ~= "MANA" and PowerBarColor and PowerBarColor[token]
-    if color then return color.r, color.g, color.b end
-    return BAR_R, BAR_G, BAR_B
-end
-
 -- The fights and power the window shows (set by Update), for opening the history panel on a click.
 local shownFights, shownPower
 
@@ -402,8 +359,8 @@ local function NewRow(i)
     end)
     -- Clicks, handled like Details' own bars (lineScript_Onmousedown/up in Details' window_main.lua):
     -- right-click opens Details' menu, a left press moves the window (unless locked), and a left click
-    -- without moving opens the history panel on this segment's fights. Returning true skips the bar's
-    -- default handling.
+    -- without moving opens the history panel on this segment's fights, in the bar's power (a rage bar opens
+    -- rage). Returning true skips the bar's default handling.
     row:SetHook("OnMouseDown", function(_, button)
         local inst = plugin:GetPluginInstance()
         if button == "RightButton" then
@@ -423,7 +380,7 @@ local function NewRow(i)
         -- A click, not a drag: the cursor stayed within a few pixels of where it was pressed.
         local x, y = GetCursorPosition()
         if row.pressX and math.abs(x - row.pressX) < 5 and math.abs(y - row.pressY) < 5 then
-            ns.OpenHistory(shownFights, shownPower)
+            ns.OpenHistory(shownFights, row.power or shownPower)
         end
         row.pressX, row.pressY = nil, nil
         return true
@@ -510,37 +467,38 @@ local function SetRowValue(row, value, wasShown)
     animFrame:Show()
 end
 
--- Fills the rows with the spells of the fights matching the window's segment, most mana first; bars are
--- relative to the top spell. Reads the window's segment each time, so switching segments shows up at the
--- next refresh.
+-- Fills the rows with the spells of the fights matching the window's segment: every power's spending
+-- (ns.SpentGroups), grouped by power with the current form's or main power first, most spent first within
+-- each. Each power has its own colour (mana blue, the game's rage and energy colours) and bar scale (its top
+-- spell is a full bar), and percentages are of that power's total. There are no header rows, since Details
+-- windows are often short; the tooltip names the power. Reads the window's segment each time, so switching
+-- segments shows up at the next refresh.
 local function Update()
     local ok, fights = pcall(FightsForSegment)
     if not ok then fights = DefaultFights() end -- a Details version with different segment data
-    local spells, power = MergedSpells(fights)
-    shownFights, shownPower = fights, power
-    local barR, barG, barB = BarColor(power or "MANA")
-    local total = 0
-    for _, spell in ipairs(spells) do total = total + spell.mana end
-    local top = spells[1] and spells[1].mana or 0
+    local groups = ns.SpentGroups(fights)
+    shownFights, shownPower = fights, groups[1] and groups[1].token
+    local list = ns.SpentRows(groups, plugin.canShow or 0, false)
 
     for i, row in ipairs(plugin.Rows) do
-        local spell = spells[i]
+        local item = list[i]
+        local spell = item and item.entry
         if i == 1 and not spell and plugin.canShow > 0 then
             -- Say why the window is empty rather than showing nothing.
-            row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment"
-                or ("No " .. (POWER_LABELS[power] or "power") .. " spent"))
+            row:SetLeftText(#fights == 0 and "No ManaMaster fight in this segment" or "No resources spent")
             row:SetRightText("")
             if GameTooltip:IsOwned(row.statusbar) then GameTooltip:Hide() end
-            row.entry, row.entryKey = nil, nil
+            row.entry, row.entryKey, row.power = nil, nil, nil
             animatingRows[row] = nil
             row.animValue = 0
             row:SetValue(0)
             row:SetIcon(UNKNOWN_ICON, ICON_COORDS)
             row:Show()
         elseif spell and i <= plugin.canShow then
-            local pct = total > 0 and spell.mana / total * 100 or 0
+            local group = item.group
+            local pct = spell.mana / group.total * 100
             -- Same compact text as the meter window: "Frostbolt" and "×8  200 (73%)"; the rank is in the tooltip.
-            row.entry = spell
+            row.entry, row.power = spell, item.group.token
             -- Rows reorder as mana is spent: if the hovered row now shows another spell, update its tooltip.
             local key = spell.spellID or spell.name
             if row.entryKey ~= key and GameTooltip:IsOwned(row.statusbar) then
@@ -550,13 +508,13 @@ local function Update()
             row:SetLeftText(ns.BarLabel(spell))
             row:SetRightText(string.format("%s%s (%.0f%%)", ns.BarCount(spell), ns.FormatNumber(spell.mana), pct))
             -- A row that showed a different spell before (spells reorder as mana changes) slides from there too.
-            SetRowValue(row, top > 0 and spell.mana / top * 100 or 0, row.statusbar:IsShown())
+            SetRowValue(row, spell.mana / group.entries[1].mana * 100, row.statusbar:IsShown())
             row:SetIcon(C_Spell.GetSpellTexture(spell.spellID or spell.name) or UNKNOWN_ICON, ICON_COORDS)
-            row:SetColor(barR, barG, barB)
+            row:SetColor(group.r, group.g, group.b)
             row:Show()
         else
             if GameTooltip:IsOwned(row.statusbar) then GameTooltip:Hide() end
-            row.entry, row.entryKey = nil, nil
+            row.entry, row.entryKey, row.power = nil, nil, nil
             row:Hide()
         end
     end

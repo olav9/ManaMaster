@@ -3,7 +3,7 @@ local _, ns = ...
 -- Meter window: a compact, damage-meter-style bar window for the active fight (the running fight live in
 -- combat, otherwise the last one). It shows one section of the history panel's details at a time (Mana
 -- spent, Mana gained, Regen buff uptime, Mana saved, Mana drained, and Rage/Energy spent and gained for
--- characters with those), chosen by clicking the title. It's
+-- characters with those; druids get one Resources spent for all three), chosen by clicking the title. It's
 -- movable (drag the title), resizable (corner grip), scalable (Ctrl + mouse wheel) and semi-transparent.
 -- Its state is saved in ManaMasterDB.meter. Toggle with /mm meter or by right-clicking the minimap button.
 
@@ -39,9 +39,14 @@ local SECTION_POWER = {} -- section title -> power token
 for _, group in ipairs(POWER_SECTIONS) do
     for _, title in ipairs(group.titles) do SECTION_POWER[title] = group.power end
 end
+-- For characters with more than one power (druids): every power's spending in one section, grouped by
+-- power (ns.SpentGroups), in place of the separate "Mana spent", "Rage spent" and "Energy spent".
+local RESOURCES_SECTION = "Resources spent"
+local SPENT_SECTIONS = { ["Mana spent"] = true, ["Rage spent"] = true, ["Energy spent"] = true }
 
 -- The sections this character can use: all of them for druids, otherwise the main power's and mana's
--- (if the character has mana), the main power first.
+-- (if the character has mana), the main power first. With more than one power, the spent sections become
+-- one "Resources spent", in the place of the first.
 local function AvailableSections()
     local _, class = UnitClass("player")
     local _, mainPower = UnitPowerType("player")
@@ -58,11 +63,25 @@ local function AvailableSections()
     end
     if class == "DRUID" then
         AddPower("MANA"); AddPower("RAGE"); AddPower("ENERGY")
-        return list
+    else
+        if mainPower == "RAGE" or mainPower == "ENERGY" then AddPower(mainPower) end
+        if hasMana or #list == 0 then AddPower("MANA") end
     end
-    if mainPower == "RAGE" or mainPower == "ENERGY" then AddPower(mainPower) end
-    if hasMana or #list == 0 then AddPower("MANA") end
-    return list
+
+    local spentCount = 0
+    for _, title in ipairs(list) do
+        if SPENT_SECTIONS[title] then spentCount = spentCount + 1 end
+    end
+    if spentCount < 2 then return list end
+    local merged = {}
+    for _, title in ipairs(list) do
+        if not SPENT_SECTIONS[title] then
+            table.insert(merged, title)
+        elseif not tContains(merged, RESOURCES_SECTION) then
+            table.insert(merged, RESOURCES_SECTION)
+        end
+    end
+    return merged
 end
 
 -- The chosen section, or the first available one if the choice doesn't apply to this character.
@@ -79,6 +98,7 @@ local MAX_MENU_ITEMS = 9
 local frame, titleButton, titleText, totalText, menu, content
 local rows = {}
 local ticker
+local resourcesLead -- the first power shown in Resources spent, for opening the history panel on a click
 
 local function Settings()
     return ns.db.meter
@@ -142,12 +162,12 @@ local function GetRow(i)
     row:SetScript("OnEnter", ShowRowTooltip)
     row:SetScript("OnLeave", GameTooltip_Hide)
     -- Left-click opens the history panel on the fight the meter shows (the running one, or the last),
-    -- in the power of the meter's section (e.g. rage).
-    row:SetScript("OnMouseUp", function(_, button)
+    -- in the row's power in Resources spent (a rage bar opens rage), else the section's power.
+    row:SetScript("OnMouseUp", function(self, button)
         if button ~= "LeftButton" then return end
         local fights = ns.char and ns.char.fights
         local fight = ns.current or (fights and fights[#fights])
-        if fight then ns.OpenHistory({ fight }, SECTION_POWER[CurrentSection()]) end
+        if fight then ns.OpenHistory({ fight }, self.power or SECTION_POWER[CurrentSection()] or resourcesLead) end
     end)
 
     row.icon = row:CreateTexture(nil, "ARTWORK")
@@ -217,7 +237,7 @@ end
 local function ShowMessage(text)
     local row = GetRow(1)
     PlaceRow(row, 1, 0)
-    row.entry = nil
+    row.entry, row.power = nil, nil
     row.icon:SetTexture(UNKNOWN_ICON)
     row.leftText:SetText("|cff999999" .. text .. "|r")
     row.rightText:SetText("")
@@ -226,6 +246,55 @@ local function ShowMessage(text)
     row.bar:SetValue(0)
     row:Show()
     for i = 2, #rows do rows[i]:Hide() end
+end
+
+-- Resources spent: each power the fight spent as a group, in its own colour and bar scale (its top spell is a
+-- full bar). With more than one, each group starts with a header row (the power and its total) and the title
+-- shows no total, since mana, rage and energy don't add up.
+local function UpdateResources(fight)
+    local groups = ns.SpentGroups({ fight })
+    resourcesLead = groups[1] and groups[1].token
+    if #groups == 0 then
+        ShowMessage("No resources spent")
+        return
+    end
+    if #groups == 1 then totalText:SetText(ns.FormatNumber(groups[1].total)) end
+
+    local _, step = RowMetrics()
+    local capacity = math.max(1, math.floor(content:GetHeight() / step))
+    local list = ns.SpentRows(groups, capacity, #groups > 1)
+    for i = 1, math.max(#rows, math.min(#list, capacity)) do
+        local item = i <= capacity and list[i]
+        local row = (item or rows[i]) and GetRow(i)
+        if row and item then
+            local wasShown = row:IsShown()
+            local group = item.group
+            row.power = group.token -- a click opens the history panel on this power
+            PlaceRow(row, i, 0)
+            row.icon:SetDesaturated(false)
+            if item.header then
+                row.entry = nil
+                row.icon:SetTexture(nil)
+                row.leftText:SetText(string.format("|cff%02x%02x%02x%s|r", group.r * 255, group.g * 255,
+                    group.b * 255, group.label))
+                row.rightText:SetText(ns.FormatNumber(group.total))
+                row.bar:SetStatusBarColor(group.r, group.g, group.b, 0.15) -- a faint full-width strip
+                SetRowValue(row, 1, wasShown)
+            else
+                local entry = item.entry
+                row.entry = entry
+                row.icon:SetTexture(C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
+                row.leftText:SetText(ns.BarLabel(entry))
+                local share = #group.entries > 1 and string.format(" (%d%%)", entry.mana / group.total * 100) or ""
+                row.rightText:SetText(ns.BarCount(entry) .. ns.FormatNumber(entry.mana) .. share)
+                row.bar:SetStatusBarColor(group.r, group.g, group.b, 0.7)
+                SetRowValue(row, entry.mana / group.entries[1].mana, wasShown)
+            end
+            row:Show()
+        elseif row then
+            row:Hide()
+        end
+    end
 end
 
 local function Update()
@@ -237,6 +306,10 @@ local function Update()
     local fight = ActiveFight()
     if not fight then
         ShowMessage("No fights recorded yet")
+        return
+    end
+    if title == RESOURCES_SECTION then
+        UpdateResources(fight)
         return
     end
     local section = FindSection(ns.BuildSections(fight, SECTION_POWER[title]), title)
@@ -272,7 +345,7 @@ local function Update()
         if row and entry then
             local wasShown = row:IsShown()
             PlaceRow(row, i, entry.child and CHILD_INDENT or 0)
-            row.entry = entry
+            row.entry, row.power = entry, nil
             row.icon:SetTexture(entry.icon or C_Spell.GetSpellTexture(entry.spellID or entry.name) or UNKNOWN_ICON)
             row.icon:SetDesaturated(entry.excluded == true)
             row.leftText:SetText(ns.BarLabel(entry)) -- name with a short rank or mp5; details in the tooltip
