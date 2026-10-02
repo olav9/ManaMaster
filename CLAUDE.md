@@ -104,6 +104,10 @@ Findings, from TBC with a level 70 elemental shaman:
   - Before the state flips, it settles regen: the regen split, and Forever's pool through `ns.Mana.OnDeathChanged`.
   - While dead: no regen split time (`AccumulateRegenSplit`), no Forever pool regen (`AdvancePool`), no buff uptime (buffs are closed at death, and `UpdateAuras` resumes them after).
   - Mana and rage/energy changes are followed but not counted (`IgnoringPowerChanges`), and also for `RES_GRACE` (2 s) after coming back to life, so a resurrection's mana isn't counted as recovered.
+  - **In-combat resurrection** (a druid's Rebirth, a soulstone, a shaman's Reincarnation/Ankh): dying takes the player out of combat, which alone would end a solo fight. So `FightShouldContinue` also keeps the fight open:
+    - while dead and not released (`IsDeadNotReleased`, read directly, since leaving combat can come just before `PLAYER_DEAD`), if a self-resurrection is available (`HasSoulstone()` returns its option), or someone offered one (`RESURRECT_REQUEST`, remembered for `RES_OFFER_TIMEOUT` = 60 s);
+    - for `RES_COMBAT_GRACE` (5 s) after coming back to life, to re-enter combat.
+    - Releasing to a ghost ends the wait. While dead, the 1 s ticker also re-reads the death state in case a resurrect event was missed.
   - **Untested in game.**
 - **Arenas** (instance type `"arena"`) are one fight per match. It starts at the first combat and is named "Arena: <zone>". It stays open through `PLAYER_REGEN_ENABLED` (`arenaActive`), so drinking and casts between bursts count toward it. It ends as soon as the match is **decided**, not when the arena closes. Ending on `PVP_MATCH_COMPLETE` alone kept adding passive regen and Water Shield mp5 while the scoreboard was up, seen on TBC.
   - `ArenaMatchDecided` returns true when `GetBattlefieldWinner()` gives a winner (classic API) or `C_PvP.GetActiveMatchState()` is `PostRound`/`Complete` (newer API). Both are optional and called through `pcall`.

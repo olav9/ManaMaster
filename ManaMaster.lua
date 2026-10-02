@@ -1338,6 +1338,27 @@ end
 local FIGHT_END_CHECK_INTERVAL = 1
 local VANISH_BUFFS = { 11327, 11329, 26888 } -- the buffs of Vanish ranks 1-3
 local fightEnding = false -- the player left combat, but the group or Vanish keeps the fight open
+-- Resurrection during a fight (a druid's Rebirth, a soulstone, a shaman's Reincarnation/Ankh): dying
+-- takes the player out of combat, but the fight shouldn't end while they can still get up and fight on.
+local RES_OFFER_TIMEOUT = 60 -- a resurrection offer expires after a minute
+local RES_COMBAT_GRACE = 5 -- seconds after coming back to life to re-enter combat before the fight ends
+local resOfferedAt -- GetTime() of the last RESURRECT_REQUEST while dead
+
+-- Read directly rather than from playerDead: leaving combat can come just before PLAYER_DEAD.
+local function IsDeadNotReleased()
+    local okDead, dead = pcall(UnitIsDead, "player")
+    local okGhost, ghost = pcall(UnitIsGhost, "player")
+    return okDead and dead == true and not (okGhost and ghost == true)
+end
+
+-- Why a dead (not released) player might still get back up in this fight, or nil.
+local function PendingResurrection(now)
+    if HasSoulstone then
+        local ok, option = pcall(HasSoulstone) -- the self-resurrect option, e.g. "Use Soulstone", "Reincarnate"
+        if ok and option then return "self-resurrection available" end
+    end
+    if resOfferedAt and now - resOfferedAt < RES_OFFER_TIMEOUT then return "resurrection offered" end
+end
 
 local function Affecting(unit)
     local ok, inCombat = pcall(UnitAffectingCombat, unit)
@@ -1369,9 +1390,18 @@ end
 
 -- Whether the running fight should go on although the player left combat, and why.
 local function FightShouldContinue()
+    local now = GetTime()
     if Affecting("player") then return true, "back in combat" end
     if GroupInCombat() then return true, "group still in combat" end
     if VanishUp() then return true, "Vanish is up" end
+    -- Dead but able to get back up (soulstone, Ankh, a battle resurrection offered): wait. Releasing to a
+    -- ghost ends the wait.
+    if IsDeadNotReleased() then
+        local pending = PendingResurrection(now)
+        if pending then return true, pending end
+    end
+    -- Just resurrected: time to re-enter combat before the fight counts as over.
+    if not playerDead and now - aliveAt < RES_COMBAT_GRACE then return true, "just resurrected" end
     return false
 end
 
@@ -1387,7 +1417,11 @@ local function TryEndFight()
     EndFight()
 end
 
+local OnDeathChanged -- defined below; the ticker needs it
+
 C_Timer.NewTicker(FIGHT_END_CHECK_INTERVAL, function()
+    -- While dead, re-read the state each second in case a resurrect event was missed.
+    if playerDead then OnDeathChanged() end
     if not fightEnding then return end
     if not ns.current or encounterActive or arenaActive then
         fightEnding = false -- ended some other way, or an encounter/arena took over
@@ -1399,7 +1433,7 @@ end)
 -- Death started or ended (PLAYER_DEAD, PLAYER_ALIVE, which also fires on becoming a ghost, and
 -- PLAYER_UNGHOST). Regen is settled up to now under the old state first: the regen split here, the
 -- client's own estimate through ns.Mana.OnDeathChanged. Buff uptime stops at death and resumes after.
-local function OnDeathChanged()
+function OnDeathChanged() -- the local declared above the ticker
     local ok, dead = pcall(UnitIsDeadOrGhost, "player")
     dead = ok and dead == true
     if dead == playerDead then return end
@@ -1419,6 +1453,7 @@ local function OnDeathChanged()
         end
     else
         aliveAt = now
+        resOfferedAt = nil
         Debug("player alive: counting resumes in", RES_GRACE, "s")
         if fight then
             fight.splitClock = now
@@ -1491,6 +1526,10 @@ frame:SetScript("OnEvent", function(self, event, ...)
         EndArenaFight("PVP_MATCH_COMPLETE") -- fallback: comes after the scoreboard's refill
     elseif event == "PLAYER_DEAD" or event == "PLAYER_ALIVE" or event == "PLAYER_UNGHOST" then
         OnDeathChanged()
+    elseif event == "RESURRECT_REQUEST" then
+        -- Someone offers a resurrection (e.g. a druid's Rebirth mid-fight): keep the fight open meanwhile.
+        resOfferedAt = GetTime()
+        Debug("resurrection offered by", Describe((...)))
     elseif event == "ZONE_CHANGED_NEW_AREA" or event == "PLAYER_ENTERING_WORLD" then
         if event == "PLAYER_ENTERING_WORLD" then OnDeathChanged() end -- e.g. logged in dead
         if not InArena() then
@@ -1540,6 +1579,7 @@ frame:RegisterEvent("PLAYER_REGEN_ENABLED")
 frame:RegisterEvent("PLAYER_DEAD")
 frame:RegisterEvent("PLAYER_ALIVE")
 frame:RegisterEvent("PLAYER_UNGHOST")
+frame:RegisterEvent("RESURRECT_REQUEST")
 frame:RegisterEvent("ENCOUNTER_START")
 frame:RegisterEvent("ENCOUNTER_END")
 frame:RegisterEvent("PLAYER_TARGET_CHANGED")
